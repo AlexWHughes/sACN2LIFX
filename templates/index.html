@@ -614,7 +614,7 @@
             if (allConfiguredLights.length === 0) {
                 configuredContainer.innerHTML = '<div class="empty-state">No lights configured yet. Discover lights and add mappings to get started.</div>';
             } else {
-                configuredContainer.innerHTML = configuredLights.map(light => {
+                configuredContainer.innerHTML = allConfiguredLights.map(light => {
                     const mapping = light.mapping || {};
                     const isDiscovered = light.discovered !== false;
                     const hasConfig = mapping.universe !== undefined && mapping.start_channel !== undefined && mapping.universe !== null && mapping.start_channel !== null;
@@ -719,7 +719,7 @@
             if (configuredLights.length === 0) {
                 configuredContainer.innerHTML = '<div class="empty-state">No lights configured yet. Discover lights and add mappings to get started.</div>';
             } else {
-                configuredContainer.innerHTML = configuredLights.map(light => {
+                configuredContainer.innerHTML = allConfiguredLights.map(light => {
                     const mapping = light.mapping || {};
                     const isDiscovered = light.discovered !== false;
                     const currentColor = light.current_color || null;
