@@ -78,6 +78,7 @@ class LifxLight:
         self.current_brightness = 0
         self.current_kelvin = DEFAULT_KELVIN
         self.current_rgb = (0, 0, 0)  # (r, g, b) as 0-255
+        self.color_set_time = 0  # Timestamp when color was last set via set_rgb
 
     def __repr__(self):
         return f"LifxLight(label='{self.label}', ip='{self.ip}', model='{self.model_name}')"
@@ -253,17 +254,21 @@ class LifxLanClient:
                                 bri = struct.unpack("<H", data[41:43])[0]
                                 kel = struct.unpack("<H", data[43:45])[0]
                                 
-                                light.current_hue = hue
-                                light.current_saturation = sat
-                                light.current_brightness = bri
-                                light.current_kelvin = kel
-                                
-                                # Convert HSBK to RGB for display
-                                h = hue / 65535.0
-                                s = sat / 65535.0
-                                v = bri / 65535.0
-                                r, g, b = colorsys.hsv_to_rgb(h, s, v)
-                                light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
+                                # Only update from STATE_LIGHT if we haven't set a color recently
+                                # This prevents stale state responses from overwriting colors we just set via DMX
+                                time_since_set = time.time() - getattr(light, 'color_set_time', 0)
+                                if time_since_set > 1.0:  # Only update if color wasn't set in last second
+                                    light.current_hue = hue
+                                    light.current_saturation = sat
+                                    light.current_brightness = bri
+                                    light.current_kelvin = kel
+                                    
+                                    # Convert HSBK to RGB for display
+                                    h = hue / 65535.0
+                                    s = sat / 65535.0
+                                    v = bri / 65535.0
+                                    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+                                    light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
                             except Exception as e:
                                 print(f"Error parsing STATE_LIGHT for {light.ip}: {e}, data_len={len(data)}")
                     else:
@@ -540,6 +545,8 @@ class LifxLanClient:
                 light.current_kelvin = kel
                 # Update RGB for display (convert from the original RGB values, not HSBK)
                 light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
+                # Mark that we just set the color (prevent stale STATE_LIGHT responses from overwriting)
+                light.color_set_time = time.time()
 
     def set_power(self, target: bytes, ip: str, power: bool):
         """Set power state for a specific light"""
