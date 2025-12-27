@@ -377,12 +377,27 @@
         
         async function validateJsonResponse(response) {
             const contentType = response.headers.get('content-type');
-            if (!contentType || !contentType.includes('application/json')) {
-                const text = await response.text();
+            // Clone response so we can read text if JSON parsing fails
+            const clonedResponse = response.clone();
+            
+            // Try to parse JSON first - some servers may not set content-type correctly
+            try {
+                const data = await response.json();
+                // If content-type doesn't match but we got valid JSON, log a warning but continue
+                if (contentType && !contentType.includes('application/json')) {
+                    console.warn('Response has non-JSON content-type but contains valid JSON:', contentType);
+                }
+                return data;
+            } catch (jsonError) {
+                // If JSON parsing fails, read the text for error message
+                const text = await clonedResponse.text();
                 const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
-                throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
+                if (!contentType || !contentType.includes('application/json')) {
+                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
+                }
+                // Content-type was JSON but parsing failed - include the JSON error
+                throw new Error(`Failed to parse JSON response (${response.status}): ${jsonError.message}${sanitizedText ? ' - ' + sanitizedText : ''}`);
             }
-            return response.json();
         }
         
         async function addManualLight() {

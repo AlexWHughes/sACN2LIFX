@@ -17,8 +17,17 @@ from flask import Flask, render_template, jsonify, request
 from lifx_client import LifxLanClient, LifxLight
 from dmx_receiver import DMXReceiver
 
-# Set up logging for DMX to LIFX traffic (controlled via ENABLE_DMX_LOG env var)
-if os.getenv('ENABLE_DMX_LOG', 'false').lower() in ('true', '1', 'yes'):
+# Set up logging for DMX to LIFX traffic (controlled via environment variables)
+# ENABLE_DMX_LOG: Enable basic DMX frame logging (default: false)
+# ENABLE_PERF_LOGGING: Enable performance/timing logging (default: false)
+# PERF_LOG_SAMPLE_RATE: Log every N frames when sampling (default: 100)
+# PERF_SEND_THRESHOLD_MS: Log sends slower than this (default: 5ms)
+# PERF_PROCESS_THRESHOLD_MS: Log processing slower than this (default: 10ms)
+
+enable_dmx_log = os.getenv('ENABLE_DMX_LOG', 'false').lower() in ('true', '1', 'yes')
+enable_perf_logging = os.getenv('ENABLE_PERF_LOGGING', 'false').lower() in ('true', '1', 'yes')
+
+if enable_dmx_log or enable_perf_logging:
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
@@ -28,6 +37,20 @@ if os.getenv('ENABLE_DMX_LOG', 'false').lower() in ('true', '1', 'yes'):
     dmx_logger.setLevel(logging.INFO)
 else:
     dmx_logger = None  # Disabled by default
+
+# Performance logging configuration
+try:
+    PERF_LOG_SAMPLE_RATE = max(1, int(os.getenv('PERF_LOG_SAMPLE_RATE', '100')))  # Log every N frames, minimum 1
+    PERF_SEND_THRESHOLD_MS = max(0.0, float(os.getenv('PERF_SEND_THRESHOLD_MS', '5.0')))  # Log slow sends
+    PERF_PROCESS_THRESHOLD_MS = max(0.0, float(os.getenv('PERF_PROCESS_THRESHOLD_MS', '10.0')))  # Log slow processing
+except ValueError as e:
+    print(f"Warning: Invalid performance logging configuration: {e}. Using defaults.")
+    PERF_LOG_SAMPLE_RATE = 100
+    PERF_SEND_THRESHOLD_MS = 5.0
+    PERF_PROCESS_THRESHOLD_MS = 10.0
+
+# Frame counter for sampling (thread-local would be better, but simple counter works for single-threaded DMX processing)
+_dmx_frame_counter = 0
 
 try:
     import netifaces
@@ -171,14 +194,21 @@ _last_sent_values: Dict[str, List[int]] = {}  # light_id -> list of channel valu
 
 def process_dmx_data(dmx_data: list, universe: int):
     """Process incoming DMX data and update lights"""
-    global lifx_client, light_mappings, _last_sent_values
+    global lifx_client, light_mappings, _last_sent_values, _dmx_frame_counter
     
     if not lifx_client or not running:
         return
     
-    process_start = time.time()
-    # if dmx_logger:
-    #     dmx_logger.info(f"DMX received: universe={universe}, data_len={len(dmx_data)}")
+    # Performance logging: track start time and frame counter
+    process_start = None
+    should_log_frame = False
+    if enable_perf_logging:
+        process_start = time.time()
+        _dmx_frame_counter += 1
+        should_log_frame = (_dmx_frame_counter % PERF_LOG_SAMPLE_RATE == 0)
+    
+    if dmx_logger and enable_dmx_log:
+        dmx_logger.info(f"DMX received: universe={universe}, data_len={len(dmx_data)}")
     
     # Build a lookup of lights by ID for faster access
     # First try filtered lights (excludes switches)
@@ -241,8 +271,8 @@ def process_dmx_data(dmx_data: list, universe: int):
                     has_significant_change = True
                     break
             if not has_significant_change:
-                # if dmx_logger:
-                #     dmx_logger.debug(f"  SKIP {light.label}: change={max_change:.1f} < threshold={VALUE_CHANGE_THRESHOLD}, values={channel_values}")
+                if dmx_logger and enable_dmx_log:
+                    dmx_logger.debug(f"  SKIP {light.label}: change={max_change:.1f} < threshold={VALUE_CHANGE_THRESHOLD}, values={channel_values}")
                 continue  # Skip update if change is too small
         
         # Store current values
@@ -263,11 +293,14 @@ def process_dmx_data(dmx_data: list, universe: int):
             # The brightness setting (0-1) acts as a maximum brightness cap
             bright_adj = brightness
             
-            rgb_int = (int(r * 255), int(g * 255), int(b * 255))
-            # if dmx_logger:
-            #     dmx_logger.info(f"  → {light.label}: RGB=({rgb_int[0]},{rgb_int[1]},{rgb_int[2]}), DMX={channel_values}, brightness={bright_adj:.2f}, fade={FADE_DURATION_MS}ms")
+            if dmx_logger and enable_dmx_log:
+                rgb_int = (int(r * 255), int(g * 255), int(b * 255))
+                dmx_logger.info(f"  → {light.label}: RGB=({rgb_int[0]},{rgb_int[1]},{rgb_int[2]}), DMX={channel_values}, brightness={bright_adj:.2f}, fade={FADE_DURATION_MS}ms")
             
-            send_start = time.time()
+            send_start = None
+            if enable_perf_logging:
+                send_start = time.time()
+            
             lifx_client.set_rgb(
                 light.target,
                 light.ip,
@@ -276,9 +309,11 @@ def process_dmx_data(dmx_data: list, universe: int):
                 duration_ms=FADE_DURATION_MS,
                 brightness=bright_adj
             )
-            send_duration = (time.time() - send_start) * 1000
-            # if dmx_logger and send_duration > 5:
-            #     dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
+            
+            if enable_perf_logging and send_start is not None:
+                send_duration = (time.time() - send_start) * 1000
+                if send_duration > PERF_SEND_THRESHOLD_MS:
+                    dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
         
         elif channel_mode == 'RGBW':
             r = channel_values[0] / MAX_RGB_PER_COLOUR
@@ -301,6 +336,10 @@ def process_dmx_data(dmx_data: list, universe: int):
             # Apply brightness multiplier from mapping
             bright_adj = brightness
             
+            send_start = None
+            if enable_perf_logging:
+                send_start = time.time()
+            
             lifx_client.set_rgb(
                 light.target,
                 light.ip,
@@ -309,6 +348,11 @@ def process_dmx_data(dmx_data: list, universe: int):
                 duration_ms=FADE_DURATION_MS,
                 brightness=bright_adj
             )
+            
+            if enable_perf_logging and send_start is not None:
+                send_duration = (time.time() - send_start) * 1000
+                if send_duration > PERF_SEND_THRESHOLD_MS:
+                    dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
         
         elif channel_mode == 'HSI':
             # HSI: Hue (0-360), Saturation (0-100), Intensity (0-100)
@@ -325,6 +369,10 @@ def process_dmx_data(dmx_data: list, universe: int):
             
             bright_adj = brightness * i  # Use intensity as brightness multiplier
             
+            send_start = None
+            if enable_perf_logging:
+                send_start = time.time()
+            
             lifx_client.set_rgb(
                 light.target,
                 light.ip,
@@ -333,6 +381,11 @@ def process_dmx_data(dmx_data: list, universe: int):
                 duration_ms=FADE_DURATION_MS,
                 brightness=bright_adj
             )
+            
+            if enable_perf_logging and send_start is not None:
+                send_duration = (time.time() - send_start) * 1000
+                if send_duration > PERF_SEND_THRESHOLD_MS:
+                    dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
         
         elif channel_mode == 'HSBK':
             # HSBK: Hue (0-360), Saturation (0-100), Brightness (0-100), Kelvin (2500-9000)
@@ -350,6 +403,10 @@ def process_dmx_data(dmx_data: list, universe: int):
             
             bright_adj = brightness * v
             
+            send_start = None
+            if enable_perf_logging:
+                send_start = time.time()
+            
             lifx_client.set_rgb(
                 light.target,
                 light.ip,
@@ -358,11 +415,20 @@ def process_dmx_data(dmx_data: list, universe: int):
                 duration_ms=FADE_DURATION_MS,
                 brightness=bright_adj
             )
+            
+            if enable_perf_logging and send_start is not None:
+                send_duration = (time.time() - send_start) * 1000
+                if send_duration > PERF_SEND_THRESHOLD_MS:
+                    dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
     
-    # Log total processing time for this DMX frame
-    # process_duration = (time.time() - process_start) * 1000
-    # if dmx_logger and process_duration > 10:
-    #     dmx_logger.warning(f"SLOW process: {process_duration:.1f}ms total for universe {universe}")
+    # Log total processing time for this DMX frame (only if performance logging enabled)
+    if enable_perf_logging and process_start is not None:
+        process_duration = (time.time() - process_start) * 1000
+        # Log if threshold exceeded OR if this is a sampled frame
+        if process_duration > PERF_PROCESS_THRESHOLD_MS:
+            dmx_logger.warning(f"SLOW process: {process_duration:.1f}ms total for universe {universe}")
+        elif should_log_frame:
+            dmx_logger.info(f"Frame process: {process_duration:.1f}ms total for universe {universe}")
 
 
 def dmx_worker():
