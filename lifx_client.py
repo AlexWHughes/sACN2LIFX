@@ -1,4 +1,3 @@
-#version 0.9
 import socket
 import struct
 import time
@@ -14,8 +13,13 @@ from typing import Dict, Optional, List, Tuple
 LIFX_PORT = 56700
 PROTO = 1024
 HEADER_SIZE = 36
-MIN_SEND_INTERVAL = 0.05  # seconds (rate limit)
+MIN_SEND_INTERVAL = 0.02  # seconds (rate limit) - allows up to 50Hz updates for smooth 40Hz sACN
 DEFAULT_KELVIN = 3500
+COLOR_SET_PROTECTION_TIME = 1.0  # seconds - prevent stale STATE_LIGHT responses from overwriting recently set colors
+COLOR_SET_PROTECTION_TIME_DMX = 5.0  # seconds - longer protection when DMX is actively running
+COLOR_SET_DMX_THRESHOLD_SECONDS = 2.0  # seconds - threshold to determine if color was set "very recently" (DMX active)
+COLOR_SET_RESET_INTERVAL = 2.0  # seconds - interval for resetting color_set_count when tracking DMX update frequency
+STATE_REQUEST_WINDOW = 2.0  # seconds - window for accepting explicitly requested state responses
 
 # Message types
 GET_SERVICE = 2
@@ -78,6 +82,10 @@ class LifxLight:
         self.current_brightness = 0
         self.current_kelvin = DEFAULT_KELVIN
         self.current_rgb = (0, 0, 0)  # (r, g, b) as 0-255
+        self.color_set_time = 0  # Timestamp when color was last set via set_rgb
+        self.state_requested_time = 0  # Timestamp when we requested state after setting color
+        self.color_set_count = 0  # Count of recent color sets (for detecting active DMX updates)
+        self.last_color_set_check = 0  # Timestamp of last color set count check
 
     def __repr__(self):
         return f"LifxLight(label='{self.label}', ip='{self.ip}', model='{self.model_name}')"
@@ -161,6 +169,44 @@ class LifxLanClient:
     def _finalise(self, packet: bytes) -> bytes:
         size = len(packet)
         return struct.pack("<H", size) + packet[2:]
+
+    def _process_state_light(self, light: LifxLight, hue: int, sat: int, bri: int, kel: int):
+        """
+        Process a STATE_LIGHT message and update light state if appropriate.
+        
+        This method implements the protection logic to prevent stale state responses
+        from overwriting recently set colours.
+        
+        Args:
+            light: The LifxLight object to update
+            hue: Hue value (0-65535)
+            sat: Saturation value (0-65535)
+            bri: Brightness value (0-65535)
+            kel: Kelvin value
+        """
+        # Only update from STATE_LIGHT if we haven't set a color recently
+        # OR if we explicitly requested the state after setting a color
+        # This prevents stale state responses from overwriting colors we just set via DMX
+        time_since_set = time.time() - light.color_set_time
+        time_since_request = time.time() - light.state_requested_time if light.state_requested_time > 0 else float('inf')
+        
+        # Use longer protection time if color was set very recently (within COLOR_SET_DMX_THRESHOLD_SECONDS, likely DMX is actively running)
+        # This prevents stale refresh responses from overwriting actively updated colors
+        protection_time = COLOR_SET_PROTECTION_TIME_DMX if time_since_set < COLOR_SET_DMX_THRESHOLD_SECONDS else COLOR_SET_PROTECTION_TIME
+        
+        # Update if: color wasn't set recently (with appropriate protection time), OR we requested state recently
+        if time_since_set > protection_time or (light.state_requested_time > 0 and time_since_request < STATE_REQUEST_WINDOW):
+            light.current_hue = hue
+            light.current_saturation = sat
+            light.current_brightness = bri
+            light.current_kelvin = kel
+            
+            # Convert HSBK to RGB for display
+            h = hue / 65535.0
+            s = sat / 65535.0
+            v = bri / 65535.0
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
 
     def _listen(self):
         """Background thread to listen for LIFX responses"""
@@ -253,17 +299,8 @@ class LifxLanClient:
                                 bri = struct.unpack("<H", data[41:43])[0]
                                 kel = struct.unpack("<H", data[43:45])[0]
                                 
-                                light.current_hue = hue
-                                light.current_saturation = sat
-                                light.current_brightness = bri
-                                light.current_kelvin = kel
-                                
-                                # Convert HSBK to RGB for display
-                                h = hue / 65535.0
-                                s = sat / 65535.0
-                                v = bri / 65535.0
-                                r, g, b = colorsys.hsv_to_rgb(h, s, v)
-                                light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
+                                # Process STATE_LIGHT using the extracted method
+                                self._process_state_light(light, hue, sat, bri, kel)
                             except Exception as e:
                                 print(f"Error parsing STATE_LIGHT for {light.ip}: {e}, data_len={len(data)}")
                     else:
@@ -538,8 +575,44 @@ class LifxLanClient:
                 light.current_saturation = sat
                 light.current_brightness = bri
                 light.current_kelvin = kel
-                # Update RGB for display (convert from the original RGB values, not HSBK)
-                light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
+                # Convert HSBK back to RGB to get the actual displayed color (with brightness applied)
+                # This ensures the stored RGB matches what's actually displayed on the light
+                h = hue / 65535.0
+                s = sat / 65535.0
+                v = bri / 65535.0
+                r_displayed, g_displayed, b_displayed = colorsys.hsv_to_rgb(h, s, v)
+                light.current_rgb = (int(r_displayed * 255), int(g_displayed * 255), int(b_displayed * 255))
+                # Mark that we just set the color (prevent stale STATE_LIGHT responses from overwriting)
+                current_time = time.time()
+                light.color_set_time = current_time
+                
+                # Track color set frequency to detect active DMX updates
+                # Reset count if more than COLOR_SET_RESET_INTERVAL has passed
+                if current_time - light.last_color_set_check > COLOR_SET_RESET_INTERVAL:
+                    light.color_set_count = 0
+                    light.last_color_set_check = current_time
+                light.color_set_count += 1
+                
+                # Only request state if colors aren't being set frequently (likely DMX is not actively running)
+                # If colors are being set more than 2 times in COLOR_SET_RESET_INTERVAL, skip state request to avoid stale responses
+                if light.color_set_count <= 2:
+                    # Request actual state from light after fade completes to get real values
+                    # This ensures we have the actual displayed color, accounting for any device-side adjustments
+                    def request_state_after_fade():
+                        # Wait for fade to complete plus a small buffer
+                        fade_time = max(duration_ms / 1000.0, 0.1) + 0.2
+                        time.sleep(fade_time)
+                        # Only request if we haven't set another color in the meantime and color set count is still low
+                        with self.lock:
+                            if target in self.lights:
+                                time_since_set = time.time() - light.color_set_time
+                                # Only request if color hasn't been updated recently and set count is still low
+                                if time_since_set >= fade_time - 0.1 and light.color_set_count <= 2:
+                                    light.state_requested_time = time.time()
+                                    self._request_light_state(light)
+                    
+                    # Request state in background thread
+                    threading.Thread(target=request_state_after_fade, daemon=True).start()
 
     def set_power(self, target: bytes, ip: str, power: bool):
         """Set power state for a specific light"""

@@ -261,6 +261,7 @@
             </div>
             <div>
                 <button class="btn btn-primary" onclick="discoverLights()">Discover Lights</button>
+                <button class="btn btn-primary" onclick="reloadConfig()" style="background: #9b59b6;" title="Reload configuration from config.json">Reload Config</button>
                 <button class="btn btn-success" id="startBtn" onclick="startDMX()">Start DMX</button>
                 <button class="btn btn-danger" id="stopBtn" onclick="stopDMX()" disabled>Stop DMX</button>
             </div>
@@ -291,6 +292,33 @@
                         </div>
                     </div>
                     <button class="btn btn-primary" onclick="saveInterfaces()" style="margin-top: 10px;">Save & Apply Settings</button>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>Test RGB (DMX-less)</h2>
+                <div style="background: #f9f9f9; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
+                    <p style="margin-bottom: 15px; color: #666; font-size: 0.9em;">
+                        Test RGB values directly on configured lights without DMX. Useful for debugging refresh issues.
+                    </p>
+                    <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 10px; margin-bottom: 15px; font-size: 0.9em;">
+                        <strong>⚠️ Important:</strong> Stop all animations before starting DMX processing to avoid conflicts and reduce network traffic.
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px; align-items: end;">
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label>Animation Update Interval (ms)</label>
+                            <input type="number" id="animationUpdateInterval" value="200" min="50" max="1000" step="50" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                            <small style="color: #666; font-size: 0.85em; display: block; margin-top: 4px;">
+                                Network request rate for animations (default: 200ms = 5Hz). Lower values = smoother but more network traffic.
+                            </small>
+                        </div>
+                        <div>
+                            <button class="btn btn-danger" onclick="stopAllAnimations()" style="padding: 8px 16px;">Stop All Animations</button>
+                        </div>
+                    </div>
+                    <div id="testRgbContainer" style="display: grid; gap: 15px;">
+                        <!-- Test RGB controls will be rendered here -->
+                    </div>
                 </div>
             </div>
             
@@ -347,6 +375,16 @@
             }, 3000);
         }
         
+        async function validateJsonResponse(response) {
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
+                throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
+            }
+            return response.json();
+        }
+        
         async function addManualLight() {
             const ipInput = document.getElementById('manualLightIP');
             const labelInput = document.getElementById('manualLightLabel');
@@ -372,7 +410,7 @@
                     body: JSON.stringify({ ip, label })
                 });
                 
-                const data = await response.json();
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     showNotification(`Light added${data.light.discovered ? ' and discovered' : ' (not discovered - will be configured when found)'}`);
@@ -398,12 +436,14 @@
             
             try {
                 const response = await fetch('/api/lights/discover', { method: 'POST' });
-                const data = await response.json();
+                
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     lights = data.lights;
                     showNotification(`Discovered ${lights.length} light(s)`);
-                    renderLights();
+                    // Reload lights to get properly separated lists from backend
+                    loadLights();
                 } else {
                     showNotification('Discovery failed: ' + data.error, true);
                     document.getElementById('discoveredLightsContainer').innerHTML = '<div class="empty-state">Discovery failed. Please try again.</div>';
@@ -485,8 +525,8 @@
                 const data = await response.json();
                 
                 if (data.success) {
-                    lights = data.lights;
-                    renderLights();
+                    lights = data.lights; // Keep for backward compatibility
+                    renderLights(data); // Pass the full response data
                     // Restore form values and open edit forms after re-rendering
                     restoreFormValues(savedData);
                 } else {
@@ -570,16 +610,7 @@
                     body: JSON.stringify(requestBody)
                 });
                 
-                // Check if response is JSON
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    console.error('Non-JSON response:', text);
-                    showNotification('Server returned an error. Please check the console.', true);
-                    return;
-                }
-                
-                const data = await response.json();
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     showNotification('Mapping updated successfully');
@@ -594,40 +625,25 @@
             }
         }
         
-        function renderLights() {
+        function renderLights(data) {
             const discoveredContainer = document.getElementById('discoveredLightsContainer');
             const configuredContainer = document.getElementById('configuredLightsContainer');
             
-            // Separate discovered and configured lights
-            const configuredLights = lights.filter(light => {
-                const mapping = light.mapping || {};
-                return mapping.universe !== undefined && mapping.start_channel !== undefined && mapping.universe !== null && mapping.start_channel !== null;
-            });
+            // Backend now handles all deduplication and separation - just use what it provides
+            const configuredLights = data.configured_lights || [];
+            const unconfiguredLights = data.unconfigured_lights || [];
+            const manualLights = data.manual_lights || [];
+            const allConfiguredLights = data.all_configured_lights || [];
             
-            const unconfiguredLights = lights.filter(light => {
-                const mapping = light.mapping || {};
-                return (mapping.universe === undefined || mapping.start_channel === undefined || mapping.universe === null || mapping.start_channel === null) && light.discovered !== false;
-            });
-            
-            // Manual lights that need configuration (have mapping but no universe/channel)
-            const manualLightsNeedingConfig = lights.filter(light => {
-                const mapping = light.mapping || {};
-                const hasMapping = Object.keys(mapping).length > 0;
-                const missingConfig = (mapping.universe === undefined || mapping.start_channel === undefined || mapping.universe === null || mapping.start_channel === null);
-                return hasMapping && missingConfig && light.discovered === false;
-            });
-            
-            // Render configured lights first (always show these, even if not discovered)
-            // Also include manual lights that need configuration
-            const allConfiguredLights = [...configuredLights, ...manualLightsNeedingConfig];
-            
+            // Render configured lights
             if (allConfiguredLights.length === 0) {
                 configuredContainer.innerHTML = '<div class="empty-state">No lights configured yet. Discover lights and add mappings to get started.</div>';
             } else {
                 configuredContainer.innerHTML = allConfiguredLights.map(light => {
                     const mapping = light.mapping || {};
                     const isDiscovered = light.discovered !== false;
-                    const hasConfig = mapping.universe !== undefined && mapping.start_channel !== undefined && mapping.universe !== null && mapping.start_channel !== null;
+                    const hasConfig = mapping.universe !== undefined && mapping.start_channel !== undefined && 
+                                     mapping.universe !== null && mapping.start_channel !== null;
                     return `
                         <div class="light-card mapped">
                             <div class="light-header">
@@ -678,10 +694,11 @@
                 }).join('');
             }
             
+            // Render test RGB controls for configured lights
+            renderTestRgbControls(allConfiguredLights);
+            
             // Render discovered (unconfigured) lights
-            if (lights.length === 0) {
-                discoveredContainer.innerHTML = '<div class="empty-state">No lights discovered. Click "Discover Lights" to search.</div>';
-            } else if (unconfiguredLights.length === 0) {
+            if (unconfiguredLights.length === 0) {
                 discoveredContainer.innerHTML = '<div class="empty-state">All discovered lights are configured.</div>';
             } else {
                 discoveredContainer.innerHTML = unconfiguredLights.map(light => {
@@ -724,73 +741,6 @@
                     `;
                 }).join('');
             }
-            
-            // Render configured lights
-            if (allConfiguredLights.length === 0) {
-                configuredContainer.innerHTML = '<div class="empty-state">No lights configured yet. Discover lights and add mappings to get started.</div>';
-            } else {
-                configuredContainer.innerHTML = allConfiguredLights.map(light => {
-                    const mapping = light.mapping || {};
-                    const isDiscovered = light.discovered !== false;
-                    const currentColor = light.current_color || null;
-                    const colorDisplay = currentColor ? 
-                        `<div style="display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 8px; background: #f0f0f0; border-radius: 4px;">
-                            <div style="width: 40px; height: 40px; border-radius: 4px; border: 2px solid #ddd; background: rgb(${currentColor.r}, ${currentColor.g}, ${currentColor.b});"></div>
-                            <div style="font-size: 0.85em;">
-                                <div style="font-weight: 600; color: #333;">Current Color</div>
-                                <div style="color: #666;">RGB(${currentColor.r}, ${currentColor.g}, ${currentColor.b}) • ${currentColor.brightness}% brightness</div>
-                            </div>
-                        </div>` : 
-                        (isDiscovered ? '<div style="font-size: 0.85em; color: #999; margin-top: 4px;">Color status unavailable</div>' : '');
-                    return `
-                        <div class="light-card mapped">
-                            <div class="light-header">
-                                <div>
-                                    <div class="light-label">${light.label}</div>
-                                    <div class="light-ip">${light.ip}</div>
-                                    <div class="light-model" style="font-size: 0.85em; color: #666; margin-top: 4px;">${light.model || 'Unknown Model'}</div>
-                                    ${!isDiscovered ? '<div style="font-size: 0.85em; color: #f44336; margin-top: 4px; font-weight: 600;">⚠️ Not currently discovered - click "Discover Lights" to reconnect</div>' : ''}
-                                    <div style="font-size: 0.85em; color: #4caf50; margin-top: 4px; font-weight: 600;">
-                                        Universe ${mapping.universe}, Channel ${mapping.start_channel} (${mapping.channel_mode || 'RGB'})
-                                    </div>
-                                    ${colorDisplay}
-                                </div>
-                            </div>
-                            <div class="mapping-form" id="edit-form-${light.id}" style="display: none;">
-                                <div class="form-group">
-                                    <label>Universe</label>
-                                    <input type="number" id="edit-universe-${light.id}" value="${mapping.universe || ''}" placeholder="e.g. 1" min="1">
-                                </div>
-                                <div class="form-group">
-                                    <label>Start Channel</label>
-                                    <input type="number" id="edit-channel-${light.id}" value="${mapping.start_channel || ''}" placeholder="e.g. 1" min="1">
-                                </div>
-                                <div class="form-group">
-                                    <label>Brightness (%)</label>
-                                    <input type="number" id="edit-brightness-${light.id}" value="${mapping.brightness !== undefined ? (mapping.brightness * 100) : 100}" step="1" min="0" max="100">
-                                </div>
-                                <div class="form-group">
-                                    <label>Channel Mode</label>
-                                    <select id="edit-channel-mode-${light.id}" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;" onchange="updateChannelModeDescription('${light.id}', true)">
-                                        ${(light.supported_modes || ['RGB']).map(mode => 
-                                            `<option value="${mode}" ${mapping.channel_mode === mode ? 'selected' : (mode === 'RGB' && !mapping.channel_mode ? 'selected' : '')}>${mode}</option>`
-                                        ).join('')}
-                                    </select>
-                                    <small id="edit-channel-mode-desc-${light.id}" style="color: #666; font-size: 0.85em; display: block; margin-top: 4px;">
-                                        ${getChannelModeDescription(mapping.channel_mode || 'RGB')}
-                                    </small>
-                                </div>
-                                <button class="btn btn-primary btn-small" onclick="updateMapping('${light.id}')">Save Changes</button>
-                                <button class="btn btn-danger btn-small" onclick="cancelEdit('${light.id}')">Cancel</button>
-                            </div>
-                            <div id="view-mode-${light.id}">
-                                <button class="btn btn-primary btn-small" onclick="editMapping('${light.id}')">Edit</button>
-                                <button class="btn btn-danger btn-small" onclick="deleteMapping('${light.id}')">Delete</button>
-                            </div>
-                        </div>
-                    `;
-                }).join('');
-            }
         }
         
         async function saveMapping(lightId) {
@@ -817,7 +767,7 @@
                     })
                 });
                 
-                const data = await response.json();
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     showNotification('Mapping saved successfully');
@@ -834,14 +784,15 @@
         async function deleteMapping(lightId) {
             try {
                 const response = await fetch(`/api/mappings/${lightId}`, { method: 'DELETE' });
-                const data = await response.json();
+                
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     showNotification('Mapping removed');
                     loadLights();
                     updateStatus();
                 } else {
-                    showNotification('Failed to remove mapping', true);
+                    showNotification('Failed to remove mapping: ' + (data.error || 'Unknown error'), true);
                 }
             } catch (error) {
                 showNotification('Error: ' + error.message, true);
@@ -850,12 +801,15 @@
         
         async function startDMX() {
             try {
+                // Stop all animations before starting DMX to avoid conflicts
+                stopAllAnimations();
+                
                 const response = await fetch('/api/control/start', { method: 'POST' });
                 const data = await response.json();
                 
                 if (data.success) {
                     running = true;
-                    showNotification('DMX processing started');
+                    showNotification('DMX processing started (all animations stopped)');
                     updateStatus();
                 } else {
                     showNotification('Failed to start: ' + data.error, true);
@@ -881,6 +835,296 @@
                 showNotification('Error: ' + error.message, true);
             }
         }
+        function renderTestRgbControls(configuredLights) {
+            const container = document.getElementById('testRgbContainer');
+            if (!container) return;
+            
+            if (!configuredLights || configuredLights.length === 0) {
+                container.innerHTML = '<div class="empty-state">No configured lights to test. Configure a light first.</div>';
+                return;
+            }
+            
+            container.innerHTML = configuredLights.map(light => {
+                return `
+                    <div style="background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 15px;">
+                        <div style="font-weight: 600; margin-bottom: 12px; color: #333;">${light.label}</div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 10px; align-items: end;">
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label style="font-size: 0.85em;">Red (0-255)</label>
+                                <input type="number" id="test-r-${light.id}" value="0" min="0" max="255" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label style="font-size: 0.85em;">Green (0-255)</label>
+                                <input type="number" id="test-g-${light.id}" value="0" min="0" max="255" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label style="font-size: 0.85em;">Blue (0-255)</label>
+                                <input type="number" id="test-b-${light.id}" value="0" min="0" max="255" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label style="font-size: 0.85em;">Brightness (0-100%)</label>
+                                <input type="number" id="test-brightness-${light.id}" value="100" min="0" max="100" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                            </div>
+                            <button class="btn btn-primary btn-small" onclick="testRgb('${light.id}')" style="padding: 8px 16px;">Test</button>
+                        </div>
+                        <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
+                            <button class="btn btn-small" onclick="setTestColor('${light.id}', 255, 0, 0)" style="background: #f44336; color: white; padding: 6px 12px; font-size: 0.85em;">Red</button>
+                            <button class="btn btn-small" onclick="setTestColor('${light.id}', 0, 255, 0)" style="background: #4caf50; color: white; padding: 6px 12px; font-size: 0.85em;">Green</button>
+                            <button class="btn btn-small" onclick="setTestColor('${light.id}', 0, 0, 255)" style="background: #2196f3; color: white; padding: 6px 12px; font-size: 0.85em;">Blue</button>
+                            <button class="btn btn-small" onclick="setTestColor('${light.id}', 255, 255, 255)" style="background: #fff; color: #333; border: 1px solid #ddd; padding: 6px 12px; font-size: 0.85em;">White</button>
+                            <button class="btn btn-small" onclick="setTestColor('${light.id}', 0, 0, 0)" style="background: #333; color: white; padding: 6px 12px; font-size: 0.85em;">Black</button>
+                            <button class="btn btn-small" id="chase-btn-${light.id}" onclick="toggleRgbChase('${light.id}')" style="background: #ff9800; color: white; padding: 6px 12px; font-size: 0.85em;">RGB Chase</button>
+                            <button class="btn btn-small" id="sinewave-btn-${light.id}" onclick="toggleSinewave('${light.id}')" style="background: #9c27b0; color: white; padding: 6px 12px; font-size: 0.85em;">Sinewave</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        function setTestColor(lightId, r, g, b) {
+            document.getElementById(`test-r-${lightId}`).value = r;
+            document.getElementById(`test-g-${lightId}`).value = g;
+            document.getElementById(`test-b-${lightId}`).value = b;
+            testRgb(lightId);
+        }
+        
+        // Store animation intervals
+        const animationIntervals = {};
+        const animationStates = {};
+        
+        // Animation update interval (default: 200ms = 5Hz to reduce network traffic)
+        let animationUpdateInterval = 200;
+        
+        // Throttle map for testRgb calls - tracks last network request time per light
+        const testRgbThrottle = {};
+        
+        // Get animation update interval from UI or use default
+        function getAnimationUpdateInterval() {
+            const input = document.getElementById('animationUpdateInterval');
+            if (input) {
+                const value = parseInt(input.value);
+                if (value >= 50 && value <= 1000) {
+                    animationUpdateInterval = value;
+                }
+            }
+            return animationUpdateInterval;
+        }
+        
+        // Throttled version of testRgb - only sends network request if enough time has passed
+        async function testRgbThrottled(lightId, force = false) {
+            const now = Date.now();
+            const lastCall = testRgbThrottle[lightId] || 0;
+            const interval = getAnimationUpdateInterval();
+            
+            // If forced or enough time has passed, make the network request
+            if (force || (now - lastCall) >= interval) {
+                testRgbThrottle[lightId] = now;
+                return await testRgb(lightId);
+            }
+            // Otherwise, just update the UI values without network request
+            return Promise.resolve();
+        }
+        
+        async function testRgb(lightId) {
+            const r = parseInt(document.getElementById(`test-r-${lightId}`).value) || 0;
+            const g = parseInt(document.getElementById(`test-g-${lightId}`).value) || 0;
+            const b = parseInt(document.getElementById(`test-b-${lightId}`).value) || 0;
+            const brightness = (parseInt(document.getElementById(`test-brightness-${lightId}`).value) || 100) / 100.0;
+            
+            try {
+                const response = await fetch('/api/lights/test-rgb', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        light_id: lightId,
+                        r: r,
+                        g: g,
+                        b: b,
+                        brightness: brightness,
+                        fade_ms: 20
+                    })
+                });
+                
+                const data = await validateJsonResponse(response);
+                
+                if (data.success) {
+                    showNotification(`Sent RGB(${r},${g},${b}) to ${data.light_label}`);
+                } else {
+                    showNotification('Failed to send RGB: ' + data.error, true);
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, true);
+            }
+        }
+        
+        function stopAnimation(lightId, animationType) {
+            const key = `${lightId}-${animationType}`;
+            if (animationIntervals[key]) {
+                clearInterval(animationIntervals[key]);
+                delete animationIntervals[key];
+                delete animationStates[key];
+            }
+            // Clear throttle for this light
+            delete testRgbThrottle[lightId];
+        }
+        
+        function stopAllAnimations() {
+            // Stop all running animations
+            for (const key in animationIntervals) {
+                clearInterval(animationIntervals[key]);
+                delete animationIntervals[key];
+            }
+            for (const key in animationStates) {
+                delete animationStates[key];
+            }
+            for (const key in testRgbThrottle) {
+                delete testRgbThrottle[key];
+            }
+            
+            // Reset all animation button states
+            document.querySelectorAll('[id$="-chase"], [id$="-sinewave"]').forEach(btn => {
+                if (btn.id.includes('-chase')) {
+                    btn.textContent = 'RGB Chase';
+                    btn.style.background = '#ff9800';
+                } else if (btn.id.includes('-sinewave')) {
+                    btn.textContent = 'Sinewave';
+                    btn.style.background = '#9c27b0';
+                }
+            });
+            
+            showNotification('All animations stopped');
+        }
+        
+        function toggleRgbChase(lightId) {
+            const key = `${lightId}-chase`;
+            const btn = document.getElementById(`chase-btn-${lightId}`);
+            
+            // Stop sinewave if running
+            stopAnimation(lightId, 'sinewave');
+            const sinewaveBtn = document.getElementById(`sinewave-btn-${lightId}`);
+            if (sinewaveBtn) {
+                sinewaveBtn.textContent = 'Sinewave';
+                sinewaveBtn.style.background = '#9c27b0';
+            }
+            
+            if (animationIntervals[key]) {
+                // Stop chase
+                stopAnimation(lightId, 'chase');
+                btn.textContent = 'RGB Chase';
+                btn.style.background = '#ff9800';
+            } else {
+                // Start chase
+                const colors = [
+                    { r: 255, g: 0, b: 0 },   // Red
+                    { r: 0, g: 255, b: 0 },   // Green
+                    { r: 0, g: 0, b: 255 }    // Blue
+                ];
+                let colorIndex = 0;
+                
+                // Set initial color
+                const initialColor = colors[colorIndex];
+                document.getElementById(`test-r-${lightId}`).value = initialColor.r;
+                document.getElementById(`test-g-${lightId}`).value = initialColor.g;
+                document.getElementById(`test-b-${lightId}`).value = initialColor.b;
+                testRgb(lightId); // Send initial color immediately
+                
+                const updateInterval = getAnimationUpdateInterval();
+                animationIntervals[key] = setInterval(() => {
+                    colorIndex = (colorIndex + 1) % colors.length;
+                    const color = colors[colorIndex];
+                    document.getElementById(`test-r-${lightId}`).value = color.r;
+                    document.getElementById(`test-g-${lightId}`).value = color.g;
+                    document.getElementById(`test-b-${lightId}`).value = color.b;
+                    testRgbThrottled(lightId); // Use throttled version
+                }, updateInterval);
+                
+                btn.textContent = 'Stop Chase';
+                btn.style.background = '#f44336';
+            }
+        }
+        
+        function toggleSinewave(lightId) {
+            const key = `${lightId}-sinewave`;
+            const btn = document.getElementById(`sinewave-btn-${lightId}`);
+            
+            // Stop chase if running
+            stopAnimation(lightId, 'chase');
+            const chaseBtn = document.getElementById(`chase-btn-${lightId}`);
+            if (chaseBtn) {
+                chaseBtn.textContent = 'RGB Chase';
+                chaseBtn.style.background = '#ff9800';
+            }
+            
+            if (animationIntervals[key]) {
+                // Stop sinewave
+                stopAnimation(lightId, 'sinewave');
+                btn.textContent = 'Sinewave';
+                btn.style.background = '#9c27b0';
+            } else {
+                // Start sinewave
+                if (!animationStates[key]) {
+                    animationStates[key] = { phase: 0 };
+                }
+                
+                const state = animationStates[key];
+                const visualUpdateInterval = 50; // Update UI every 50ms for smooth visual feedback
+                const networkUpdateInterval = getAnimationUpdateInterval(); // Network requests at configured rate
+                const speed = 0.02; // Speed of sinewave (adjust for faster/slower)
+                
+                // Send initial color immediately
+                const initialR = Math.floor((Math.sin(state.phase) + 1) / 2 * 255);
+                const initialG = Math.floor((Math.sin(state.phase + (2 * Math.PI / 3)) + 1) / 2 * 255);
+                const initialB = Math.floor((Math.sin(state.phase + (4 * Math.PI / 3)) + 1) / 2 * 255);
+                document.getElementById(`test-r-${lightId}`).value = initialR;
+                document.getElementById(`test-g-${lightId}`).value = initialG;
+                document.getElementById(`test-b-${lightId}`).value = initialB;
+                testRgb(lightId); // Send initial color immediately
+                
+                // Update UI frequently for smooth visual feedback, but throttle network requests
+                animationIntervals[key] = setInterval(() => {
+                    state.phase += speed;
+                    if (state.phase >= Math.PI * 2) {
+                        state.phase -= Math.PI * 2;
+                    }
+                    
+                    // Calculate RGB using sine waves with phase offsets
+                    // Red: sine wave starting at 0
+                    // Green: sine wave starting at 2π/3 (120 degrees)
+                    // Blue: sine wave starting at 4π/3 (240 degrees)
+                    const r = Math.floor((Math.sin(state.phase) + 1) / 2 * 255);
+                    const g = Math.floor((Math.sin(state.phase + (2 * Math.PI / 3)) + 1) / 2 * 255);
+                    const b = Math.floor((Math.sin(state.phase + (4 * Math.PI / 3)) + 1) / 2 * 255);
+                    
+                    // Always update UI for smooth visual feedback
+                    document.getElementById(`test-r-${lightId}`).value = r;
+                    document.getElementById(`test-g-${lightId}`).value = g;
+                    document.getElementById(`test-b-${lightId}`).value = b;
+                    
+                    // Throttle network requests to reduce traffic
+                    testRgbThrottled(lightId);
+                }, visualUpdateInterval);
+                
+                btn.textContent = 'Stop Sinewave';
+                btn.style.background = '#f44336';
+            }
+        }
+        
+        async function reloadConfig() {
+            try {
+                const response = await fetch('/api/config/reload', { method: 'POST' });
+                const data = await validateJsonResponse(response);
+                
+                if (data.success) {
+                    showNotification(`Configuration reloaded (${data.mappings_count} mappings)`);
+                    loadLights();
+                    updateStatus();
+                } else {
+                    showNotification('Failed to reload config: ' + (data.error || 'Unknown error'), true);
+                }
+            } catch (error) {
+                showNotification('Error reloading config: ' + error.message, true);
+            }
+        }
         
         async function updateStatus() {
             try {
@@ -899,6 +1143,7 @@
                     if (running) {
                         indicator.className = 'status-indicator running';
                         statusText.textContent = 'Running';
+                        statusText.style.color = '#000';
                         statusDetails.textContent = `${data.lights_count} lights, ${data.mappings_count} mapped`;
                         startBtn.disabled = true;
                         stopBtn.disabled = false;
@@ -913,7 +1158,7 @@
                                 const packets = stats.packets_received || 0;
                                 dmxStatus.innerHTML = `<span style="color: #4caf50;">●</span> Receiving sACN | Universes: ${universes} | Packets: ${packets.toLocaleString()}`;
                             } else {
-                                dmxStatus.innerHTML = `<span style="color: #f44336;">●</span> Waiting for sACN data...`;
+                                dmxStatus.innerHTML = `<span style="color: #f44336;">●</span> Waiting`;
                             }
                         } else {
                             dmxStatus.innerHTML = '';
@@ -921,6 +1166,7 @@
                     } else {
                         indicator.className = 'status-indicator stopped';
                         statusText.textContent = 'Stopped';
+                        statusText.style.color = '#000';
                         statusDetails.textContent = `${data.lights_count} lights, ${data.mappings_count} mapped`;
                         dmxStatus.innerHTML = '';
                         startBtn.disabled = false;
@@ -1015,8 +1261,6 @@
         
         // Update status every 2 seconds
         setInterval(updateStatus, 2000);
-        // Auto-refresh light status every 3 seconds
-        setInterval(loadLights, 3000);
     </script>
     <footer style="background: #2c3e50; color: white; padding: 20px; text-align: center; margin-top: 30px;">
         <div style="font-size: 0.9em;">
