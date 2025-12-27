@@ -425,8 +425,10 @@ def process_dmx_data(dmx_data: list, universe: int):
     if enable_perf_logging and process_start is not None:
         process_duration = (time.time() - process_start) * 1000
         # Log if threshold exceeded OR if this is a sampled frame
-        if process_duration > PERF_PROCESS_THRESHOLD_MS or should_log_frame:
+        if process_duration > PERF_PROCESS_THRESHOLD_MS:
             dmx_logger.warning(f"SLOW process: {process_duration:.1f}ms total for universe {universe}")
+        elif should_log_frame:
+            dmx_logger.info(f"Frame process: {process_duration:.1f}ms total for universe {universe}")
 
 
 def dmx_worker():
