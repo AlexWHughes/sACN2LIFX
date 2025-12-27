@@ -1,4 +1,3 @@
-#version 0.9
 import sacn
 import threading
 import time

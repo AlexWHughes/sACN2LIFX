@@ -261,6 +261,7 @@
             </div>
             <div>
                 <button class="btn btn-primary" onclick="discoverLights()">Discover Lights</button>
+                <button class="btn btn-primary" onclick="reloadConfig()" style="background: #9b59b6;" title="Reload configuration from config.json">Reload Config</button>
                 <button class="btn btn-success" id="startBtn" onclick="startDMX()">Start DMX</button>
                 <button class="btn btn-danger" id="stopBtn" onclick="stopDMX()" disabled>Stop DMX</button>
             </div>
@@ -372,6 +373,14 @@
                     body: JSON.stringify({ ip, label })
                 });
                 
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
+                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
+                }
+                
                 const data = await response.json();
                 
                 if (data.success) {
@@ -398,12 +407,22 @@
             
             try {
                 const response = await fetch('/api/lights/discover', { method: 'POST' });
+                
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
+                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
+                }
+                
                 const data = await response.json();
                 
                 if (data.success) {
                     lights = data.lights;
                     showNotification(`Discovered ${lights.length} light(s)`);
-                    renderLights();
+                    // Reload lights to get properly separated lists from backend
+                    loadLights();
                 } else {
                     showNotification('Discovery failed: ' + data.error, true);
                     document.getElementById('discoveredLightsContainer').innerHTML = '<div class="empty-state">Discovery failed. Please try again.</div>';
@@ -485,8 +504,8 @@
                 const data = await response.json();
                 
                 if (data.success) {
-                    lights = data.lights;
-                    renderLights();
+                    lights = data.lights; // Keep for backward compatibility
+                    renderLights(data); // Pass the full response data
                     // Restore form values and open edit forms after re-rendering
                     restoreFormValues(savedData);
                 } else {
@@ -594,40 +613,25 @@
             }
         }
         
-        function renderLights() {
+        function renderLights(data) {
             const discoveredContainer = document.getElementById('discoveredLightsContainer');
             const configuredContainer = document.getElementById('configuredLightsContainer');
             
-            // Separate discovered and configured lights
-            const configuredLights = lights.filter(light => {
-                const mapping = light.mapping || {};
-                return mapping.universe !== undefined && mapping.start_channel !== undefined && mapping.universe !== null && mapping.start_channel !== null;
-            });
+            // Backend now handles all deduplication and separation - just use what it provides
+            const configuredLights = data.configured_lights || [];
+            const unconfiguredLights = data.unconfigured_lights || [];
+            const manualLights = data.manual_lights || [];
+            const allConfiguredLights = data.all_configured_lights || [];
             
-            const unconfiguredLights = lights.filter(light => {
-                const mapping = light.mapping || {};
-                return (mapping.universe === undefined || mapping.start_channel === undefined || mapping.universe === null || mapping.start_channel === null) && light.discovered !== false;
-            });
-            
-            // Manual lights that need configuration (have mapping but no universe/channel)
-            const manualLightsNeedingConfig = lights.filter(light => {
-                const mapping = light.mapping || {};
-                const hasMapping = Object.keys(mapping).length > 0;
-                const missingConfig = (mapping.universe === undefined || mapping.start_channel === undefined || mapping.universe === null || mapping.start_channel === null);
-                return hasMapping && missingConfig && light.discovered === false;
-            });
-            
-            // Render configured lights first (always show these, even if not discovered)
-            // Also include manual lights that need configuration
-            const allConfiguredLights = [...configuredLights, ...manualLightsNeedingConfig];
-            
+            // Render configured lights
             if (allConfiguredLights.length === 0) {
                 configuredContainer.innerHTML = '<div class="empty-state">No lights configured yet. Discover lights and add mappings to get started.</div>';
             } else {
                 configuredContainer.innerHTML = allConfiguredLights.map(light => {
                     const mapping = light.mapping || {};
                     const isDiscovered = light.discovered !== false;
-                    const hasConfig = mapping.universe !== undefined && mapping.start_channel !== undefined && mapping.universe !== null && mapping.start_channel !== null;
+                    const hasConfig = mapping.universe !== undefined && mapping.start_channel !== undefined && 
+                                     mapping.universe !== null && mapping.start_channel !== null;
                     return `
                         <div class="light-card mapped">
                             <div class="light-header">
@@ -679,9 +683,7 @@
             }
             
             // Render discovered (unconfigured) lights
-            if (lights.length === 0) {
-                discoveredContainer.innerHTML = '<div class="empty-state">No lights discovered. Click "Discover Lights" to search.</div>';
-            } else if (unconfiguredLights.length === 0) {
+            if (unconfiguredLights.length === 0) {
                 discoveredContainer.innerHTML = '<div class="empty-state">All discovered lights are configured.</div>';
             } else {
                 discoveredContainer.innerHTML = unconfiguredLights.map(light => {
@@ -724,73 +726,6 @@
                     `;
                 }).join('');
             }
-            
-            // Render configured lights
-            if (allConfiguredLights.length === 0) {
-                configuredContainer.innerHTML = '<div class="empty-state">No lights configured yet. Discover lights and add mappings to get started.</div>';
-            } else {
-                configuredContainer.innerHTML = allConfiguredLights.map(light => {
-                    const mapping = light.mapping || {};
-                    const isDiscovered = light.discovered !== false;
-                    const currentColor = light.current_color || null;
-                    const colorDisplay = currentColor ? 
-                        `<div style="display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 8px; background: #f0f0f0; border-radius: 4px;">
-                            <div style="width: 40px; height: 40px; border-radius: 4px; border: 2px solid #ddd; background: rgb(${currentColor.r}, ${currentColor.g}, ${currentColor.b});"></div>
-                            <div style="font-size: 0.85em;">
-                                <div style="font-weight: 600; color: #333;">Current Color</div>
-                                <div style="color: #666;">RGB(${currentColor.r}, ${currentColor.g}, ${currentColor.b}) • ${currentColor.brightness}% brightness</div>
-                            </div>
-                        </div>` : 
-                        (isDiscovered ? '<div style="font-size: 0.85em; color: #999; margin-top: 4px;">Color status unavailable</div>' : '');
-                    return `
-                        <div class="light-card mapped">
-                            <div class="light-header">
-                                <div>
-                                    <div class="light-label">${light.label}</div>
-                                    <div class="light-ip">${light.ip}</div>
-                                    <div class="light-model" style="font-size: 0.85em; color: #666; margin-top: 4px;">${light.model || 'Unknown Model'}</div>
-                                    ${!isDiscovered ? '<div style="font-size: 0.85em; color: #f44336; margin-top: 4px; font-weight: 600;">⚠️ Not currently discovered - click "Discover Lights" to reconnect</div>' : ''}
-                                    <div style="font-size: 0.85em; color: #4caf50; margin-top: 4px; font-weight: 600;">
-                                        Universe ${mapping.universe}, Channel ${mapping.start_channel} (${mapping.channel_mode || 'RGB'})
-                                    </div>
-                                    ${colorDisplay}
-                                </div>
-                            </div>
-                            <div class="mapping-form" id="edit-form-${light.id}" style="display: none;">
-                                <div class="form-group">
-                                    <label>Universe</label>
-                                    <input type="number" id="edit-universe-${light.id}" value="${mapping.universe || ''}" placeholder="e.g. 1" min="1">
-                                </div>
-                                <div class="form-group">
-                                    <label>Start Channel</label>
-                                    <input type="number" id="edit-channel-${light.id}" value="${mapping.start_channel || ''}" placeholder="e.g. 1" min="1">
-                                </div>
-                                <div class="form-group">
-                                    <label>Brightness (%)</label>
-                                    <input type="number" id="edit-brightness-${light.id}" value="${mapping.brightness !== undefined ? (mapping.brightness * 100) : 100}" step="1" min="0" max="100">
-                                </div>
-                                <div class="form-group">
-                                    <label>Channel Mode</label>
-                                    <select id="edit-channel-mode-${light.id}" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;" onchange="updateChannelModeDescription('${light.id}', true)">
-                                        ${(light.supported_modes || ['RGB']).map(mode => 
-                                            `<option value="${mode}" ${mapping.channel_mode === mode ? 'selected' : (mode === 'RGB' && !mapping.channel_mode ? 'selected' : '')}>${mode}</option>`
-                                        ).join('')}
-                                    </select>
-                                    <small id="edit-channel-mode-desc-${light.id}" style="color: #666; font-size: 0.85em; display: block; margin-top: 4px;">
-                                        ${getChannelModeDescription(mapping.channel_mode || 'RGB')}
-                                    </small>
-                                </div>
-                                <button class="btn btn-primary btn-small" onclick="updateMapping('${light.id}')">Save Changes</button>
-                                <button class="btn btn-danger btn-small" onclick="cancelEdit('${light.id}')">Cancel</button>
-                            </div>
-                            <div id="view-mode-${light.id}">
-                                <button class="btn btn-primary btn-small" onclick="editMapping('${light.id}')">Edit</button>
-                                <button class="btn btn-danger btn-small" onclick="deleteMapping('${light.id}')">Delete</button>
-                            </div>
-                        </div>
-                    `;
-                }).join('');
-            }
         }
         
         async function saveMapping(lightId) {
@@ -817,6 +752,14 @@
                     })
                 });
                 
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
+                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
+                }
+                
                 const data = await response.json();
                 
                 if (data.success) {
@@ -839,7 +782,9 @@
                 const contentType = response.headers.get('content-type');
                 if (!contentType || !contentType.includes('application/json')) {
                     const text = await response.text();
-                    throw new Error(`Server returned non-JSON response (${response.status}): ${text.substring(0, 100)}`);
+                    // Sanitize and truncate error text to prevent exposing sensitive information
+                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
+                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
                 }
                 
                 const data = await response.json();
@@ -889,6 +834,29 @@
                 showNotification('Error: ' + error.message, true);
             }
         }
+        async function reloadConfig() {
+            try {
+                const response = await fetch('/api/config/reload', { method: 'POST' });
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
+                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
+                }
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showNotification(`Configuration reloaded (${data.mappings_count} mappings)`);
+                    loadLights();
+                    updateStatus();
+                } else {
+                    showNotification('Failed to reload config: ' + (data.error || 'Unknown error'), true);
+                }
+            } catch (error) {
+                showNotification('Error reloading config: ' + error.message, true);
+            }
+        }
         
         async function updateStatus() {
             try {
@@ -907,6 +875,7 @@
                     if (running) {
                         indicator.className = 'status-indicator running';
                         statusText.textContent = 'Running';
+                        statusText.style.color = '#000';
                         statusDetails.textContent = `${data.lights_count} lights, ${data.mappings_count} mapped`;
                         startBtn.disabled = true;
                         stopBtn.disabled = false;
@@ -921,7 +890,7 @@
                                 const packets = stats.packets_received || 0;
                                 dmxStatus.innerHTML = `<span style="color: #4caf50;">●</span> Receiving sACN | Universes: ${universes} | Packets: ${packets.toLocaleString()}`;
                             } else {
-                                dmxStatus.innerHTML = `<span style="color: #f44336;">●</span> Waiting for sACN data...`;
+                                dmxStatus.innerHTML = `<span style="color: #f44336;">●</span> Waiting`;
                             }
                         } else {
                             dmxStatus.innerHTML = '';
@@ -929,6 +898,7 @@
                     } else {
                         indicator.className = 'status-indicator stopped';
                         statusText.textContent = 'Stopped';
+                        statusText.style.color = '#000';
                         statusDetails.textContent = `${data.lights_count} lights, ${data.mappings_count} mapped`;
                         dmxStatus.innerHTML = '';
                         startBtn.disabled = false;
@@ -1023,8 +993,6 @@
         
         // Update status every 2 seconds
         setInterval(updateStatus, 2000);
-        // Auto-refresh light status every 3 seconds
-        setInterval(loadLights, 3000);
     </script>
     <footer style="background: #2c3e50; color: white; padding: 20px; text-align: center; margin-top: 30px;">
         <div style="font-size: 0.9em;">

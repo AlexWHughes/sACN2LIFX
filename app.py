@@ -10,10 +10,20 @@ import threading
 import time
 import colorsys
 import socket
+import logging
 from typing import Optional, Dict, List
 from flask import Flask, render_template, jsonify, request
 from lifx_client import LifxLanClient, LifxLight
 from dmx_receiver import DMXReceiver
+
+# Set up logging for DMX to LIFX traffic
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+dmx_logger = logging.getLogger('dmx_lifx')
+dmx_logger.setLevel(logging.INFO)
 
 try:
     import netifaces
@@ -32,6 +42,9 @@ dmx_thread: Optional[threading.Thread] = None
 lifx_interface: Optional[str] = None  # Network interface IP for LIFX
 sacn_interface: Optional[str] = None  # Network interface IP for sACN
 
+# Thread synchronization for DMX state mutations
+dmx_lock = threading.Lock()
+
 # Configuration
 CONFIG_FILE = "config.json"
 MAX_BRIGHTNESS = 1.0  # Stored as 0-1 internally, displayed as 0-100%
@@ -42,8 +55,8 @@ DEFAULT_KELVIN = 3500
 MAX_HUE = 360  # Degrees
 MAX_SATURATION = 100  # Percentage
 MAX_INTENSITY = 100  # Percentage
-FADE_DURATION_MS = 50  # Smooth fade duration for color transitions (milliseconds)
-VALUE_CHANGE_THRESHOLD = 2  # Only update if DMX value changed by this much (0-255)
+FADE_DURATION_MS = 20  # Smooth fade duration for color transitions (milliseconds) - optimized for 40Hz sACN
+VALUE_CHANGE_THRESHOLD = 1  # Only update if DMX value changed by this much (0-255) - lower for smoother transitions
 
 
 def load_config():
@@ -51,12 +64,25 @@ def load_config():
     global light_mappings, lifx_interface, sacn_interface
     try:
         with open(CONFIG_FILE, 'r') as f:
-            config = json.load(f)
+            content = f.read().strip()
+            # Handle empty file
+            if not content:
+                light_mappings = {}
+                lifx_interface = None
+                sacn_interface = None
+                return
+            
+            config = json.loads(content)
             light_mappings = config.get('mappings', {})
             settings = config.get('settings', {})
             lifx_interface = settings.get('lifx_interface', None)
             sacn_interface = settings.get('sacn_interface', None)
     except FileNotFoundError:
+        light_mappings = {}
+        lifx_interface = None
+        sacn_interface = None
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"Warning: Error parsing config.json: {e}. Using empty configuration.")
         light_mappings = {}
         lifx_interface = None
         sacn_interface = None
@@ -146,9 +172,25 @@ def process_dmx_data(dmx_data: list, universe: int):
     if not lifx_client or not running:
         return
     
+    process_start = time.time()
+    dmx_logger.info(f"DMX received: universe={universe}, data_len={len(dmx_data)}")
+    
     # Build a lookup of lights by ID for faster access
+    # First try filtered lights (excludes switches)
     lights = lifx_client.get_lights()
     lights_by_id = {light_id(light): light for light in lights}
+    
+    # Also check raw lights dictionary for configured lights that might be filtered out
+    # This allows configured lights to work even if they're misidentified as switches
+    # (Some devices may be incorrectly identified as switches but are actually lights)
+    with lifx_client.lock:
+        raw_lights = lifx_client.lights
+        for target, light in raw_lights.items():
+            lid = light_id(light)
+            if lid not in lights_by_id and lid in light_mappings:
+                # This is a configured light that was filtered out - include it anyway
+                # We trust the user's configuration over automatic detection
+                lights_by_id[lid] = light
     
     # Iterate through mappings to ensure correct light-channel mapping
     for mapped_light_id, mapping in light_mappings.items():
@@ -183,14 +225,18 @@ def process_dmx_data(dmx_data: list, universe: int):
         if last_values is not None:
             # Check if any channel has changed by threshold
             has_significant_change = False
+            max_change = 0
             for i, val in enumerate(channel_values):
                 if i >= len(last_values):
                     has_significant_change = True
                     break
-                if abs(val - last_values[i]) >= VALUE_CHANGE_THRESHOLD:
+                change = abs(val - last_values[i])
+                max_change = max(max_change, change)
+                if change >= VALUE_CHANGE_THRESHOLD:
                     has_significant_change = True
                     break
             if not has_significant_change:
+                dmx_logger.debug(f"  SKIP {light.label}: change={max_change:.1f} < threshold={VALUE_CHANGE_THRESHOLD}, values={channel_values}")
                 continue  # Skip update if change is too small
         
         # Store current values
@@ -211,6 +257,10 @@ def process_dmx_data(dmx_data: list, universe: int):
             # The brightness setting (0-1) acts as a maximum brightness cap
             bright_adj = brightness
             
+            rgb_int = (int(r * 255), int(g * 255), int(b * 255))
+            dmx_logger.info(f"  → {light.label}: RGB=({rgb_int[0]},{rgb_int[1]},{rgb_int[2]}), DMX={channel_values}, brightness={bright_adj:.2f}, fade={FADE_DURATION_MS}ms")
+            
+            send_start = time.time()
             lifx_client.set_rgb(
                 light.target,
                 light.ip,
@@ -219,6 +269,9 @@ def process_dmx_data(dmx_data: list, universe: int):
                 duration_ms=FADE_DURATION_MS,
                 brightness=bright_adj
             )
+            send_duration = (time.time() - send_start) * 1000
+            if send_duration > 5:
+                dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
         
         elif channel_mode == 'RGBW':
             r = channel_values[0] / MAX_RGB_PER_COLOUR
@@ -298,6 +351,11 @@ def process_dmx_data(dmx_data: list, universe: int):
                 duration_ms=FADE_DURATION_MS,
                 brightness=bright_adj
             )
+    
+    # Log total processing time for this DMX frame
+    process_duration = (time.time() - process_start) * 1000
+    if process_duration > 10:
+        dmx_logger.warning(f"SLOW process: {process_duration:.1f}ms total for universe {universe}")
 
 
 def dmx_worker():
@@ -331,46 +389,85 @@ def dmx_worker():
 
 def _restart_dmx_if_running():
     """Restart DMX worker if it's currently running (to pick up mapping changes)"""
-    global running, dmx_receiver, dmx_thread
+    global running, dmx_receiver, dmx_thread, dmx_lock
     
-    if not running:
-        return  # Not running, nothing to restart
-    
-    if not dmx_receiver:
-        return  # No receiver, nothing to restart
-    
-    try:
-        # Stop the current worker
+    # Acquire lock and check preconditions inside lock to avoid TOCTOU issues
+    with dmx_lock:
+        # Check preconditions inside lock
+        if not running:
+            return  # Not running, nothing to restart
+        
+        if not dmx_receiver:
+            return  # No receiver, nothing to restart
+        
+        # Store references for operations outside lock
+        old_receiver = dmx_receiver
+        old_thread = dmx_thread
+        
+        # Update state atomically
         running = False
-        if dmx_receiver:
-            dmx_receiver.stop()
-            dmx_receiver.reset_stats()
+        dmx_receiver = None
+        dmx_thread = None
+    
+    # Perform potentially blocking operations outside lock
+    try:
+        # Stop the old receiver (may block)
+        if old_receiver:
+            old_receiver.stop()
+            old_receiver.reset_stats()
         
-        # Wait for thread to finish
-        if dmx_thread and dmx_thread.is_alive():
-            dmx_thread.join(timeout=1.0)
+        # Wait for thread to finish (may block)
+        if old_thread and old_thread.is_alive():
+            old_thread.join(timeout=1.0)
+            # Check if thread is still alive after timeout
+            if old_thread.is_alive():
+                print("Warning: DMX worker thread did not finish within timeout, continuing anyway")
         
-        # Restart with updated mappings
-        sacn_bind_ip = None if _normalize_interface_ip(sacn_interface) == '0.0.0.0' else sacn_interface
-        
-        # Close and recreate receiver
-        if dmx_receiver:
+        # Close old receiver (may block)
+        if old_receiver:
             try:
-                dmx_receiver.close()
-            except:
-                pass
-            dmx_receiver = None
+                old_receiver.close()
+            except Exception as e:
+                print(f"Warning: Error closing DMX receiver: {e}")
         
-        # Create new receiver
-        dmx_receiver = DMXReceiver(bind_ip=sacn_bind_ip)
+        # Prepare new receiver (may block)
+        sacn_bind_ip = None if _normalize_interface_ip(sacn_interface) == '0.0.0.0' else sacn_interface
+        new_receiver = DMXReceiver(bind_ip=sacn_bind_ip)
         
-        # Start worker thread
-        running = True
-        dmx_thread = threading.Thread(target=dmx_worker, daemon=True)
-        dmx_thread.start()
+        # Create new thread
+        new_thread = threading.Thread(target=dmx_worker, daemon=True)
+        
+        # Acquire lock again for final state mutations
+        with dmx_lock:
+            # Double-check that no other thread has interfered (e.g., called stop_dmx)
+            # If dmx_receiver is not None, another thread may have started/stopped it
+            if dmx_receiver is not None:
+                # Another thread has modified state, clean up and abort
+                try:
+                    new_receiver.close()
+                except Exception as e:
+                    print(f"Warning: Error closing new receiver after state conflict: {e}")
+                return
+            
+            # Update state atomically
+            dmx_receiver = new_receiver
+            running = True
+            dmx_thread = new_thread
+        
+        # Start thread outside lock (may block briefly)
+        new_thread.start()
+        print("DMX worker restarted successfully")
     except Exception as e:
         print(f"Error restarting DMX worker: {e}")
-        running = False
+        import traceback
+        traceback.print_exc()
+        # Ensure state is consistent on error
+        with dmx_lock:
+            running = False
+            if dmx_receiver:
+                dmx_receiver = None
+            if dmx_thread:
+                dmx_thread = None
 
 
 # =========================
@@ -459,8 +556,9 @@ def discover_lights():
                 # Interface changed, recreate client
                 lifx_client.close()
                 lifx_client = LifxLanClient(bind_ip=lifx_bind_ip)
-        except:
+        except Exception as e:
             # Socket might be closed, recreate
+            print(f"Warning: Error checking LIFX client socket, recreating client: {e}")
             lifx_client = LifxLanClient(bind_ip=lifx_bind_ip)
     
     try:
@@ -492,8 +590,6 @@ def get_lights():
     def _build_light_data(light: LifxLight, discovered: bool = True) -> Dict:
         """Build light data dictionary for API response"""
         lid = light_id(light)
-        rgb = getattr(light, 'current_rgb', (0, 0, 0))
-        brightness_pct = int((getattr(light, 'current_brightness', 0) / 65535.0) * 100)
         
         return {
             'id': lid,
@@ -504,25 +600,23 @@ def get_lights():
             'product_id': light.product,
             'supported_modes': getattr(light, 'supported_modes', ['RGB']),
             'mapping': light_mappings.get(lid, {}),
-            'discovered': discovered,
-            'current_color': {
-                'r': rgb[0],
-                'g': rgb[1],
-                'b': rgb[2],
-                'brightness': brightness_pct
-            } if discovered else None
+            'discovered': discovered
         }
     
-    # Get discovered lights
+    # Use dict to handle deduplication - prefer discovered lights over undiscovered
+    all_lights = {}
+    
+    # Get discovered lights first (these take priority)
     if lifx_client:
         lights = lifx_client.get_lights()
         for light in lights:
-            lights_data.append(_build_light_data(light, discovered=True))
+            lid = light_id(light)
+            # Always prefer discovered lights
+            all_lights[lid] = _build_light_data(light, discovered=True)
     
     # Add configured lights that aren't currently discovered
-    discovered_ids = {light['id'] for light in lights_data}
     for mapped_light_id, mapping in light_mappings.items():
-        if mapped_light_id not in discovered_ids:
+        if mapped_light_id not in all_lights:
             # Create a minimal light object for undiscovered lights
             stored_label = mapping.get('label') or f"Light {mapped_light_id[:8]}..."
             stored_model = mapping.get('model') or 'Not discovered'
@@ -545,38 +639,75 @@ def get_lights():
             fake_light.product = 0
             fake_light.supported_modes = ['RGB', 'RGBW', 'HSI', 'HSBK']
             
-            lights_data.append(_build_light_data(fake_light, discovered=False))
+            all_lights[mapped_light_id] = _build_light_data(fake_light, discovered=False)
     
-    # Refresh light states if client is available (but don't block the response)
-    if lifx_client:
-        # Request state refresh in background
-        threading.Thread(target=lifx_client.refresh_light_states, daemon=True).start()
-        # Wait briefly for responses
-        time.sleep(0.3)
-        # Re-fetch lights to get updated colors
-        lights = lifx_client.get_lights()
-        lights_by_id = {light_id(light): light for light in lights}
-        # Update color info in lights_data
-        for light_data in lights_data:
-            if light_data['discovered']:
-                light = lights_by_id.get(light_data['id'])
-                if light:
-                    rgb = getattr(light, 'current_rgb', (0, 0, 0))
-                    brightness_pct = int((getattr(light, 'current_brightness', 0) / 65535.0) * 100)
-                    light_data['current_color'] = {
-                        'r': rgb[0],
-                        'g': rgb[1],
-                        'b': rgb[2],
-                        'brightness': brightness_pct
-                    }
     
-    return jsonify({'success': True, 'lights': lights_data})
+    # Separate into configured and unconfigured lights (backend handles all logic)
+    configured_lights = []
+    unconfigured_lights = []
+    manual_lights_needing_config = []
+    
+    for light in all_lights.values():
+        mapping = light.get('mapping', {})
+        universe = mapping.get('universe')
+        start_channel = mapping.get('start_channel')
+        
+        # Check if light has a complete mapping
+        has_complete_mapping = (universe is not None and universe != '' and 
+                               start_channel is not None and start_channel != '')
+        
+        # Check if it's a manual light with partial mapping
+        has_partial_mapping = (mapping and len(mapping) > 0 and not has_complete_mapping and 
+                               not light.get('discovered', True))
+        
+        if has_complete_mapping:
+            configured_lights.append(light)
+        elif has_partial_mapping:
+            manual_lights_needing_config.append(light)
+        elif light.get('discovered', False):
+            # Only include discovered lights that aren't configured
+            unconfigured_lights.append(light)
+    
+    # Combine configured and manual lights for backward compatibility
+    all_configured = configured_lights + manual_lights_needing_config
+    
+    return jsonify({
+        'success': True,
+        'configured_lights': configured_lights,
+        'unconfigured_lights': unconfigured_lights,
+        'manual_lights': manual_lights_needing_config,
+        'all_configured_lights': all_configured,  # For frontend convenience
+        # Keep 'lights' for backward compatibility (all lights combined)
+        'lights': list(all_lights.values())
+    })
 
 
 @app.route('/api/mappings', methods=['GET'])
 def get_mappings():
     """Get current light mappings"""
     return jsonify({'success': True, 'mappings': light_mappings})
+
+
+@app.route('/api/config/reload', methods=['POST'])
+def reload_config():
+    """Reload configuration from file"""
+    global light_mappings, lifx_interface, sacn_interface, dmx_receiver, dmx_thread, running
+    
+    try:
+        # Load config from file
+        load_config()
+        
+        # Restart DMX worker if running to pick up mapping changes
+        if running:
+            _restart_dmx_if_running()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Configuration reloaded successfully',
+            'mappings_count': len(light_mappings)
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/mappings', methods=['POST'])
@@ -771,43 +902,48 @@ def add_manual_light():
 @app.route('/api/control/start', methods=['POST'])
 def start_dmx():
     """Start DMX processing"""
-    global running, dmx_receiver, dmx_thread, lifx_client
+    global running, dmx_receiver, dmx_thread, lifx_client, dmx_lock
     
-    if running:
-        return jsonify({'success': False, 'error': 'Already running'}), 400
-    
-    if not lifx_client:
-        return jsonify({'success': False, 'error': 'No lights discovered'}), 400
+    with dmx_lock:
+        if running:
+            return jsonify({'success': False, 'error': 'Already running'}), 400
+        
+        if not lifx_client:
+            return jsonify({'success': False, 'error': 'No lights discovered'}), 400
     
     try:
         sacn_bind_ip = None if _normalize_interface_ip(sacn_interface) == '0.0.0.0' else sacn_interface
         
-        # Close existing receiver if it exists
+        # Close existing receiver if it exists (outside lock to avoid blocking)
         if dmx_receiver:
             try:
                 dmx_receiver.close()
-            except:
-                pass
+            except Exception as e:
+                print(f"Warning: Error closing existing DMX receiver: {e}")
             dmx_receiver = None
         
         # Create new receiver
         dmx_receiver = DMXReceiver(bind_ip=sacn_bind_ip)
         
-        running = True
-        dmx_thread = threading.Thread(target=dmx_worker, daemon=True)
-        dmx_thread.start()
+        with dmx_lock:
+            running = True
+            dmx_thread = threading.Thread(target=dmx_worker, daemon=True)
+            dmx_thread.start()
         
         return jsonify({'success': True})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/control/stop', methods=['POST'])
 def stop_dmx():
     """Stop DMX processing"""
-    global running, dmx_receiver
+    global running, dmx_receiver, dmx_lock
     
-    running = False
+    with dmx_lock:
+        running = False
     
     if dmx_receiver:
         dmx_receiver.stop()
