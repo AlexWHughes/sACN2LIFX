@@ -1,0 +1,4 @@
+flask>=2.3.0
+sacn>=1.11.0
+netifaces>=0.11.0
+

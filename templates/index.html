@@ -1,0 +1,1020 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>sACN2LIFX Control</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f0f0f0;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        header {
+            background: #2c3e50;
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .status-bar {
+            background: #f5f5f5;
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-indicator.running {
+            background: #4caf50;
+            box-shadow: 0 0 8px #4caf50;
+        }
+        
+        .status-indicator.stopped {
+            background: #f44336;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s;
+            margin: 0 5px;
+        }
+        
+        .btn-primary {
+            background: #3498db;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #2980b9;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(52, 152, 219, 0.4);
+        }
+        
+        .btn-success {
+            background: #4caf50;
+            color: white;
+        }
+        
+        .btn-success:hover {
+            background: #45a049;
+        }
+        
+        .btn-danger {
+            background: #f44336;
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background: #da190b;
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .content {
+            padding: 30px;
+        }
+        
+        .section {
+            margin-bottom: 30px;
+        }
+        
+        .section h2 {
+            margin-bottom: 20px;
+            color: #333;
+            font-size: 1.5em;
+        }
+        
+        .lights-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        
+        .light-card {
+            background: #f9f9f9;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            transition: all 0.3s;
+        }
+        
+        .light-card:hover {
+            border-color: #3498db;
+            box-shadow: 0 4px 12px rgba(52, 152, 219, 0.2);
+        }
+        
+        .light-card.mapped {
+            border-color: #4caf50;
+            background: #f1f8f4;
+        }
+        
+        .light-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .light-label {
+            font-weight: 600;
+            font-size: 1.1em;
+            color: #333;
+        }
+        
+        .light-ip {
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .mapping-form {
+            display: grid;
+            gap: 10px;
+        }
+        
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .form-group label {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        
+        .form-group input {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .form-group input:focus {
+            outline: none;
+            border-color: #3498db;
+        }
+        
+        .btn-small {
+            padding: 8px 16px;
+            font-size: 12px;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #3498db;
+        }
+        
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            background: #4caf50;
+            color: white;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            display: none;
+            z-index: 1000;
+        }
+        
+        .notification.error {
+            background: #f44336;
+        }
+        
+        .notification.show {
+            display: block;
+            animation: slideIn 0.3s;
+        }
+        
+        @keyframes slideIn {
+            from {
+                transform: translateX(400px);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>sACN2LIFX Control</h1>
+            <p>Created by Alex Hughes</p>
+        </header>
+        
+        <div class="status-bar">
+            <div>
+                <span class="status-indicator" id="statusIndicator"></span>
+                <span id="statusText">Stopped</span>
+                <span id="statusDetails" style="margin-left: 15px; color: #666;"></span>
+                <span id="dmxStatus" style="margin-left: 20px; color: #666; font-size: 0.9em;"></span>
+            </div>
+            <div>
+                <button class="btn btn-primary" onclick="discoverLights()">Discover Lights</button>
+                <button class="btn btn-success" id="startBtn" onclick="startDMX()">Start DMX</button>
+                <button class="btn btn-danger" id="stopBtn" onclick="stopDMX()" disabled>Stop DMX</button>
+            </div>
+        </div>
+        
+        <div class="content">
+            <div class="section">
+                <h2>Network Settings</h2>
+                <div style="background: #f9f9f9; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 15px;">
+                        <div class="form-group">
+                            <label>LIFX Interface</label>
+                            <select id="lifxInterfaceSelect" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                                <option value="">Loading interfaces...</option>
+                            </select>
+                            <small style="color: #666; font-size: 0.85em; display: block; margin-top: 4px;">
+                                Network interface for LIFX light discovery
+                            </small>
+                        </div>
+                        <div class="form-group">
+                            <label>sACN Interface</label>
+                            <select id="sacnInterfaceSelect" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                                <option value="">Loading interfaces...</option>
+                            </select>
+                            <small style="color: #666; font-size: 0.85em; display: block; margin-top: 4px;">
+                                Network interface for sACN (DMX) reception
+                            </small>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="saveInterfaces()" style="margin-top: 10px;">Save & Apply Settings</button>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>Manually Add Light</h2>
+                <div style="background: #f9f9f9; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
+                    <p style="margin-bottom: 15px; color: #666; font-size: 0.9em;">
+                        Add a light by IP address if it's not discoverable on your network.
+                    </p>
+                    <div style="display: grid; grid-template-columns: 2fr 2fr 1fr; gap: 15px; align-items: end;">
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label>IP Address</label>
+                            <input type="text" id="manualLightIP" placeholder="e.g. 192.168.1.100" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label>Label (Optional)</label>
+                            <input type="text" id="manualLightLabel" placeholder="e.g. Living Room Light" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                        </div>
+                        <div>
+                            <button class="btn btn-primary" onclick="addManualLight()" style="width: 100%;">Add Light</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>Discovered Lights</h2>
+                <div id="discoveredLightsContainer">
+                    <div class="loading">Click "Discover Lights" to find LIFX devices on your network</div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>Configured Lights</h2>
+                <div id="configuredLightsContainer">
+                    <div class="empty-state">No lights configured yet. Discover lights and add mappings to get started.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="notification" id="notification"></div>
+    
+    <script>
+        let lights = [];
+        let running = false;
+        
+        function showNotification(message, isError = false) {
+            const notif = document.getElementById('notification');
+            notif.textContent = message;
+            notif.className = 'notification' + (isError ? ' error' : '') + ' show';
+            setTimeout(() => {
+                notif.classList.remove('show');
+            }, 3000);
+        }
+        
+        async function addManualLight() {
+            const ipInput = document.getElementById('manualLightIP');
+            const labelInput = document.getElementById('manualLightLabel');
+            const ip = ipInput.value.trim();
+            const label = labelInput.value.trim();
+            
+            if (!ip) {
+                showNotification('Please enter an IP address', true);
+                return;
+            }
+            
+            // Basic IP validation
+            const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+            if (!ipRegex.test(ip)) {
+                showNotification('Invalid IP address format', true);
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/lights/manual', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip, label })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showNotification(`Light added${data.light.discovered ? ' and discovered' : ' (not discovered - will be configured when found)'}`);
+                    ipInput.value = '';
+                    labelInput.value = '';
+                    loadLights();
+                    updateStatus();
+                } else {
+                    showNotification('Failed to add light: ' + data.error, true);
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, true);
+            }
+        }
+        
+        async function discoverLights() {
+            const discoverBtn = document.querySelector('button[onclick="discoverLights()"]');
+            const discoveredContainer = document.getElementById('discoveredLightsContainer');
+            
+            // Show loading state
+            discoverBtn.disabled = true;
+            discoveredContainer.innerHTML = '<div class="loading">Please wait while discovering lights...<br><small>This may take up to 7 seconds</small></div>';
+            
+            try {
+                const response = await fetch('/api/lights/discover', { method: 'POST' });
+                const data = await response.json();
+                
+                if (data.success) {
+                    lights = data.lights;
+                    showNotification(`Discovered ${lights.length} light(s)`);
+                    renderLights();
+                } else {
+                    showNotification('Discovery failed: ' + data.error, true);
+                    document.getElementById('discoveredLightsContainer').innerHTML = '<div class="empty-state">Discovery failed. Please try again.</div>';
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, true);
+                document.getElementById('discoveredLightsContainer').innerHTML = '<div class="empty-state">Error during discovery. Please try again.</div>';
+            } finally {
+                discoverBtn.disabled = false;
+            }
+        }
+        
+        function saveFormValues() {
+            // Save form values for both unconfigured and configured (edit) lights before re-rendering
+            const formValues = {};
+            const openEditForms = [];
+            
+            // Save values from discovered (unconfigured) lights
+            const discoveredContainer = document.getElementById('discoveredLightsContainer');
+            if (discoveredContainer) {
+                const inputs = discoveredContainer.querySelectorAll('input[type="number"], select');
+                inputs.forEach(input => {
+                    if (input.value && input.value.trim() !== '') {
+                        formValues[input.id] = input.value;
+                    }
+                });
+            }
+            
+            // Save values from configured lights edit forms (only if form is visible)
+            const configuredContainer = document.getElementById('configuredLightsContainer');
+            if (configuredContainer) {
+                const editForms = configuredContainer.querySelectorAll('[id^="edit-form-"]');
+                editForms.forEach(form => {
+                    // Only save if the form is visible (being edited)
+                    if (form.style.display !== 'none') {
+                        const lightId = form.id.replace('edit-form-', '');
+                        openEditForms.push(lightId);
+                        const inputs = form.querySelectorAll('input[type="number"], select');
+                        inputs.forEach(input => {
+                            if (input.value && input.value.trim() !== '') {
+                                formValues[input.id] = input.value;
+                            }
+                        });
+                    }
+                });
+            }
+            
+            return { formValues, openEditForms };
+        }
+        
+        function restoreFormValues(savedData) {
+            const { formValues, openEditForms } = savedData;
+            
+            // Restore form values after re-rendering
+            Object.keys(formValues).forEach(id => {
+                const input = document.getElementById(id);
+                if (input) {
+                    input.value = formValues[id];
+                }
+            });
+            
+            // Re-open edit forms that were open
+            openEditForms.forEach(lightId => {
+                const editForm = document.getElementById(`edit-form-${lightId}`);
+                const viewMode = document.getElementById(`view-mode-${lightId}`);
+                if (editForm && viewMode) {
+                    editForm.style.display = 'block';
+                    viewMode.style.display = 'none';
+                }
+            });
+        }
+        
+        async function loadLights() {
+            try {
+                // Save form values before re-rendering
+                const savedData = saveFormValues();
+                
+                const response = await fetch('/api/lights');
+                const data = await response.json();
+                
+                if (data.success) {
+                    lights = data.lights;
+                    renderLights();
+                    // Restore form values and open edit forms after re-rendering
+                    restoreFormValues(savedData);
+                } else {
+                    console.error('Failed to load lights:', data.error);
+                }
+            } catch (error) {
+                console.error('Error loading lights:', error);
+            }
+        }
+        
+        function getChannelModeDescription(mode) {
+            const descriptions = {
+                'RGB': '3 channels: Red, Green, Blue',
+                'RGBW': '4 channels: Red, Green, Blue, White',
+                'HSI': '3 channels: Hue (0-360°), Saturation (0-100%), Intensity (0-100%)',
+                'HSBK': '4 channels: Hue, Saturation, Brightness, Kelvin (2500-9000K)'
+            };
+            return descriptions[mode] || descriptions['RGB'];
+        }
+        
+        function updateChannelModeDescription(lightId, isEdit = false) {
+            const prefix = isEdit ? 'edit-' : '';
+            const select = document.getElementById(`${prefix}channel-mode-${lightId}`);
+            const desc = document.getElementById(`${prefix}channel-mode-desc-${lightId}`);
+            if (select && desc) {
+                desc.textContent = getChannelModeDescription(select.value);
+            }
+        }
+        
+        function editMapping(lightId) {
+            document.getElementById(`view-mode-${lightId}`).style.display = 'none';
+            document.getElementById(`edit-form-${lightId}`).style.display = 'block';
+        }
+        
+        function cancelEdit(lightId) {
+            document.getElementById(`view-mode-${lightId}`).style.display = 'block';
+            document.getElementById(`edit-form-${lightId}`).style.display = 'none';
+            // Reload to reset form values
+            loadLights();
+        }
+        
+        async function updateMapping(lightId) {
+            const universe = document.getElementById(`edit-universe-${lightId}`).value.trim();
+            const startChannel = document.getElementById(`edit-channel-${lightId}`).value.trim();
+            const brightness = document.getElementById(`edit-brightness-${lightId}`).value.trim();
+            const channelMode = document.getElementById(`edit-channel-mode-${lightId}`).value;
+            
+            if (!universe || !startChannel) {
+                showNotification('Please fill in Universe and Start Channel', true);
+                return;
+            }
+            
+            const universeNum = parseInt(universe);
+            const channelNum = parseInt(startChannel);
+            const brightnessNum = brightness ? parseFloat(brightness) / 100 : null;
+            
+            if (isNaN(universeNum) || universeNum < 1) {
+                showNotification('Universe must be a valid number greater than 0', true);
+                return;
+            }
+            if (isNaN(channelNum) || channelNum < 1) {
+                showNotification('Start Channel must be a valid number greater than 0', true);
+                return;
+            }
+            
+            try {
+                const requestBody = {
+                    light_id: lightId,
+                    universe: universeNum,
+                    start_channel: channelNum,
+                    channel_mode: channelMode || 'RGB'
+                };
+                
+                if (brightnessNum !== null && !isNaN(brightnessNum)) {
+                    requestBody.brightness = brightnessNum;
+                }
+                
+                const response = await fetch('/api/mappings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showNotification('Mapping updated successfully');
+                    loadLights();
+                    updateStatus();
+                } else {
+                    showNotification('Failed to update mapping: ' + data.error, true);
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, true);
+            }
+        }
+        
+        function renderLights() {
+            const discoveredContainer = document.getElementById('discoveredLightsContainer');
+            const configuredContainer = document.getElementById('configuredLightsContainer');
+            
+            // Separate discovered and configured lights
+            const configuredLights = lights.filter(light => {
+                const mapping = light.mapping || {};
+                return mapping.universe !== undefined && mapping.start_channel !== undefined && mapping.universe !== null && mapping.start_channel !== null;
+            });
+            
+            const unconfiguredLights = lights.filter(light => {
+                const mapping = light.mapping || {};
+                return (mapping.universe === undefined || mapping.start_channel === undefined || mapping.universe === null || mapping.start_channel === null) && light.discovered !== false;
+            });
+            
+            // Manual lights that need configuration (have mapping but no universe/channel)
+            const manualLightsNeedingConfig = lights.filter(light => {
+                const mapping = light.mapping || {};
+                const hasMapping = Object.keys(mapping).length > 0;
+                const missingConfig = (mapping.universe === undefined || mapping.start_channel === undefined || mapping.universe === null || mapping.start_channel === null);
+                return hasMapping && missingConfig && light.discovered === false;
+            });
+            
+            // Render configured lights first (always show these, even if not discovered)
+            // Also include manual lights that need configuration
+            const allConfiguredLights = [...configuredLights, ...manualLightsNeedingConfig];
+            
+            if (allConfiguredLights.length === 0) {
+                configuredContainer.innerHTML = '<div class="empty-state">No lights configured yet. Discover lights and add mappings to get started.</div>';
+            } else {
+                configuredContainer.innerHTML = configuredLights.map(light => {
+                    const mapping = light.mapping || {};
+                    const isDiscovered = light.discovered !== false;
+                    return `
+                        <div class="light-card mapped">
+                            <div class="light-header">
+                                <div>
+                                    <div class="light-label">${light.label}</div>
+                                    <div class="light-ip">${light.ip}</div>
+                                    <div class="light-model" style="font-size: 0.85em; color: #666; margin-top: 4px;">${light.model || 'Unknown Model'}</div>
+                                    ${!isDiscovered ? '<div style="font-size: 0.85em; color: #f44336; margin-top: 4px; font-weight: 600;">⚠️ Not currently discovered - click "Discover Lights" to reconnect</div>' : ''}
+                                    <div style="font-size: 0.85em; color: #4caf50; margin-top: 4px; font-weight: 600;">
+                                        Universe ${mapping.universe}, Channel ${mapping.start_channel} (${mapping.channel_mode || 'RGB'})
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mapping-form" id="edit-form-${light.id}" style="display: none;">
+                                <div class="form-group">
+                                    <label>Universe</label>
+                                    <input type="number" id="edit-universe-${light.id}" value="${mapping.universe || ''}" placeholder="e.g. 1" min="1">
+                                </div>
+                                <div class="form-group">
+                                    <label>Start Channel</label>
+                                    <input type="number" id="edit-channel-${light.id}" value="${mapping.start_channel || ''}" placeholder="e.g. 1" min="1">
+                                </div>
+                                <div class="form-group">
+                                    <label>Brightness (%)</label>
+                                    <input type="number" id="edit-brightness-${light.id}" value="${mapping.brightness !== undefined ? (mapping.brightness * 100) : 100}" step="1" min="0" max="100">
+                                </div>
+                                <div class="form-group">
+                                    <label>Channel Mode</label>
+                                    <select id="edit-channel-mode-${light.id}" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;" onchange="updateChannelModeDescription('${light.id}', true)">
+                                        ${(light.supported_modes || ['RGB']).map(mode => 
+                                            `<option value="${mode}" ${mapping.channel_mode === mode ? 'selected' : (mode === 'RGB' && !mapping.channel_mode ? 'selected' : '')}>${mode}</option>`
+                                        ).join('')}
+                                    </select>
+                                    <small id="edit-channel-mode-desc-${light.id}" style="color: #666; font-size: 0.85em; display: block; margin-top: 4px;">
+                                        ${getChannelModeDescription(mapping.channel_mode || 'RGB')}
+                                    </small>
+                                </div>
+                                <button class="btn btn-primary btn-small" onclick="updateMapping('${light.id}')">Save Changes</button>
+                                <button class="btn btn-danger btn-small" onclick="cancelEdit('${light.id}')">Cancel</button>
+                            </div>
+                            <div id="view-mode-${light.id}">
+                                <button class="btn btn-primary btn-small" onclick="editMapping('${light.id}')">Edit</button>
+                                <button class="btn btn-danger btn-small" onclick="deleteMapping('${light.id}')">Delete</button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+            
+            // Render discovered (unconfigured) lights
+            if (lights.length === 0) {
+                discoveredContainer.innerHTML = '<div class="empty-state">No lights discovered. Click "Discover Lights" to search.</div>';
+            } else if (unconfiguredLights.length === 0) {
+                discoveredContainer.innerHTML = '<div class="empty-state">All discovered lights are configured.</div>';
+            } else {
+                discoveredContainer.innerHTML = unconfiguredLights.map(light => {
+                    return `
+                        <div class="light-card">
+                            <div class="light-header">
+                                <div>
+                                    <div class="light-label">${light.label}</div>
+                                    <div class="light-ip">${light.ip}</div>
+                                    <div class="light-model" style="font-size: 0.85em; color: #666; margin-top: 4px;">${light.model || 'Unknown Model'}</div>
+                                </div>
+                            </div>
+                            <div class="mapping-form">
+                                <div class="form-group">
+                                    <label>Universe</label>
+                                    <input type="number" id="universe-${light.id}" placeholder="e.g. 1" min="1">
+                                </div>
+                                <div class="form-group">
+                                    <label>Start Channel</label>
+                                    <input type="number" id="channel-${light.id}" placeholder="e.g. 1" min="1">
+                                </div>
+                                <div class="form-group">
+                                    <label>Brightness (%)</label>
+                                    <input type="number" id="brightness-${light.id}" value="100" step="1" min="0" max="100">
+                                </div>
+                                <div class="form-group">
+                                    <label>Channel Mode</label>
+                                    <select id="channel-mode-${light.id}" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;" onchange="updateChannelModeDescription('${light.id}')">
+                                        ${(light.supported_modes || ['RGB']).map(mode => 
+                                            `<option value="${mode}" ${mode === 'RGB' ? 'selected' : ''}>${mode}</option>`
+                                        ).join('')}
+                                    </select>
+                                    <small id="channel-mode-desc-${light.id}" style="color: #666; font-size: 0.85em; display: block; margin-top: 4px;">
+                                        ${getChannelModeDescription('RGB')}
+                                    </small>
+                                </div>
+                                <button class="btn btn-primary btn-small" onclick="saveMapping('${light.id}')">Add Configuration</button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+            
+            // Render configured lights
+            if (configuredLights.length === 0) {
+                configuredContainer.innerHTML = '<div class="empty-state">No lights configured yet. Discover lights and add mappings to get started.</div>';
+            } else {
+                configuredContainer.innerHTML = configuredLights.map(light => {
+                    const mapping = light.mapping || {};
+                    const isDiscovered = light.discovered !== false;
+                    const currentColor = light.current_color || null;
+                    const colorDisplay = currentColor ? 
+                        `<div style="display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 8px; background: #f0f0f0; border-radius: 4px;">
+                            <div style="width: 40px; height: 40px; border-radius: 4px; border: 2px solid #ddd; background: rgb(${currentColor.r}, ${currentColor.g}, ${currentColor.b});"></div>
+                            <div style="font-size: 0.85em;">
+                                <div style="font-weight: 600; color: #333;">Current Color</div>
+                                <div style="color: #666;">RGB(${currentColor.r}, ${currentColor.g}, ${currentColor.b}) • ${currentColor.brightness}% brightness</div>
+                            </div>
+                        </div>` : 
+                        (isDiscovered ? '<div style="font-size: 0.85em; color: #999; margin-top: 4px;">Color status unavailable</div>' : '');
+                    return `
+                        <div class="light-card mapped">
+                            <div class="light-header">
+                                <div>
+                                    <div class="light-label">${light.label}</div>
+                                    <div class="light-ip">${light.ip}</div>
+                                    <div class="light-model" style="font-size: 0.85em; color: #666; margin-top: 4px;">${light.model || 'Unknown Model'}</div>
+                                    ${!isDiscovered ? '<div style="font-size: 0.85em; color: #f44336; margin-top: 4px; font-weight: 600;">⚠️ Not currently discovered - click "Discover Lights" to reconnect</div>' : ''}
+                                    <div style="font-size: 0.85em; color: #4caf50; margin-top: 4px; font-weight: 600;">
+                                        Universe ${mapping.universe}, Channel ${mapping.start_channel} (${mapping.channel_mode || 'RGB'})
+                                    </div>
+                                    ${colorDisplay}
+                                </div>
+                            </div>
+                            <div class="mapping-form" id="edit-form-${light.id}" style="display: none;">
+                                <div class="form-group">
+                                    <label>Universe</label>
+                                    <input type="number" id="edit-universe-${light.id}" value="${mapping.universe || ''}" placeholder="e.g. 1" min="1">
+                                </div>
+                                <div class="form-group">
+                                    <label>Start Channel</label>
+                                    <input type="number" id="edit-channel-${light.id}" value="${mapping.start_channel || ''}" placeholder="e.g. 1" min="1">
+                                </div>
+                                <div class="form-group">
+                                    <label>Brightness (%)</label>
+                                    <input type="number" id="edit-brightness-${light.id}" value="${mapping.brightness !== undefined ? (mapping.brightness * 100) : 100}" step="1" min="0" max="100">
+                                </div>
+                                <div class="form-group">
+                                    <label>Channel Mode</label>
+                                    <select id="edit-channel-mode-${light.id}" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;" onchange="updateChannelModeDescription('${light.id}', true)">
+                                        ${(light.supported_modes || ['RGB']).map(mode => 
+                                            `<option value="${mode}" ${mapping.channel_mode === mode ? 'selected' : (mode === 'RGB' && !mapping.channel_mode ? 'selected' : '')}>${mode}</option>`
+                                        ).join('')}
+                                    </select>
+                                    <small id="edit-channel-mode-desc-${light.id}" style="color: #666; font-size: 0.85em; display: block; margin-top: 4px;">
+                                        ${getChannelModeDescription(mapping.channel_mode || 'RGB')}
+                                    </small>
+                                </div>
+                                <button class="btn btn-primary btn-small" onclick="updateMapping('${light.id}')">Save Changes</button>
+                                <button class="btn btn-danger btn-small" onclick="cancelEdit('${light.id}')">Cancel</button>
+                            </div>
+                            <div id="view-mode-${light.id}">
+                                <button class="btn btn-primary btn-small" onclick="editMapping('${light.id}')">Edit</button>
+                                <button class="btn btn-danger btn-small" onclick="deleteMapping('${light.id}')">Delete</button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+        }
+        
+        async function saveMapping(lightId) {
+            const universe = document.getElementById(`universe-${lightId}`).value;
+            const startChannel = document.getElementById(`channel-${lightId}`).value;
+            const brightness = document.getElementById(`brightness-${lightId}`).value;
+            const channelMode = document.getElementById(`channel-mode-${lightId}`).value;
+            
+            if (!universe || !startChannel) {
+                showNotification('Please fill in Universe and Start Channel', true);
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/mappings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        light_id: lightId,
+                        universe: parseInt(universe),
+                        start_channel: parseInt(startChannel),
+                        brightness: parseFloat(brightness) / 100,
+                        channel_mode: channelMode
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showNotification('Mapping saved successfully');
+                    loadLights();
+                    updateStatus();
+                } else {
+                    showNotification('Failed to save mapping: ' + data.error, true);
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, true);
+            }
+        }
+        
+        async function deleteMapping(lightId) {
+            try {
+                const response = await fetch(`/api/mappings/${lightId}`, { method: 'DELETE' });
+                const data = await response.json();
+                
+                if (data.success) {
+                    showNotification('Mapping removed');
+                    loadLights();
+                    updateStatus();
+                } else {
+                    showNotification('Failed to remove mapping', true);
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, true);
+            }
+        }
+        
+        async function startDMX() {
+            try {
+                const response = await fetch('/api/control/start', { method: 'POST' });
+                const data = await response.json();
+                
+                if (data.success) {
+                    running = true;
+                    showNotification('DMX processing started');
+                    updateStatus();
+                } else {
+                    showNotification('Failed to start: ' + data.error, true);
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, true);
+            }
+        }
+        
+        async function stopDMX() {
+            try {
+                const response = await fetch('/api/control/stop', { method: 'POST' });
+                const data = await response.json();
+                
+                if (data.success) {
+                    running = false;
+                    showNotification('DMX processing stopped');
+                    updateStatus();
+                } else {
+                    showNotification('Failed to stop', true);
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, true);
+            }
+        }
+        
+        async function updateStatus() {
+            try {
+                const response = await fetch('/api/control/status');
+                const data = await response.json();
+                
+                if (data.success) {
+                    running = data.running;
+                    const indicator = document.getElementById('statusIndicator');
+                    const statusText = document.getElementById('statusText');
+                    const statusDetails = document.getElementById('statusDetails');
+                    const dmxStatus = document.getElementById('dmxStatus');
+                    const startBtn = document.getElementById('startBtn');
+                    const stopBtn = document.getElementById('stopBtn');
+                    
+                    if (running) {
+                        indicator.className = 'status-indicator running';
+                        statusText.textContent = 'Running';
+                        statusDetails.textContent = `${data.lights_count} lights, ${data.mappings_count} mapped`;
+                        startBtn.disabled = true;
+                        stopBtn.disabled = false;
+                        
+                        // Update DMX reception status
+                        if (data.dmx_stats && Object.keys(data.dmx_stats).length > 0) {
+                            const stats = data.dmx_stats;
+                            if (stats.receiving) {
+                                const universes = stats.active_universes.length > 0 
+                                    ? stats.active_universes.join(', ') 
+                                    : 'none';
+                                const packets = stats.packets_received || 0;
+                                dmxStatus.innerHTML = `<span style="color: #4caf50;">●</span> Receiving sACN | Universes: ${universes} | Packets: ${packets.toLocaleString()}`;
+                            } else {
+                                dmxStatus.innerHTML = `<span style="color: #f44336;">●</span> Waiting for sACN data...`;
+                            }
+                        } else {
+                            dmxStatus.innerHTML = '';
+                        }
+                    } else {
+                        indicator.className = 'status-indicator stopped';
+                        statusText.textContent = 'Stopped';
+                        statusDetails.textContent = `${data.lights_count} lights, ${data.mappings_count} mapped`;
+                        dmxStatus.innerHTML = '';
+                        startBtn.disabled = false;
+                        stopBtn.disabled = true;
+                    }
+                }
+            } catch (error) {
+                console.error('Error updating status:', error);
+            }
+        }
+        
+        async function loadInterfaces() {
+            try {
+                const response = await fetch('/api/interfaces');
+                const data = await response.json();
+                
+                if (data.success) {
+                    const lifxSelect = document.getElementById('lifxInterfaceSelect');
+                    const sacnSelect = document.getElementById('sacnInterfaceSelect');
+                    
+                    const optionHtml = data.interfaces.map(iface => 
+                        `<option value="${iface.ip}">${iface.display}</option>`
+                    ).join('');
+                    
+                    lifxSelect.innerHTML = optionHtml;
+                    sacnSelect.innerHTML = optionHtml;
+                    
+                    // Set selected values
+                    if (data.lifx_interface) {
+                        lifxSelect.value = data.lifx_interface;
+                    }
+                    if (data.sacn_interface) {
+                        sacnSelect.value = data.sacn_interface;
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading interfaces:', error);
+            }
+        }
+        
+        async function saveInterfaces() {
+            const lifxSelect = document.getElementById('lifxInterfaceSelect');
+            const sacnSelect = document.getElementById('sacnInterfaceSelect');
+            
+            const lifxIp = lifxSelect.value;
+            const sacnIp = sacnSelect.value;
+            
+            if (!lifxIp || !sacnIp) {
+                showNotification('Please select both interfaces', true);
+                return;
+            }
+            
+            try {
+                // First save the settings
+                const saveResponse = await fetch('/api/settings/interfaces', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        lifx_interface: lifxIp,
+                        sacn_interface: sacnIp
+                    })
+                });
+                
+                const saveData = await saveResponse.json();
+                
+                if (!saveData.success) {
+                    showNotification('Failed to save settings: ' + saveData.error, true);
+                    return;
+                }
+                
+                // Then apply the settings (recreate clients)
+                const applyResponse = await fetch('/api/settings/interfaces/apply', {
+                    method: 'POST'
+                });
+                
+                const applyData = await applyResponse.json();
+                
+                if (applyData.success) {
+                    showNotification('Network settings saved and applied successfully');
+                } else {
+                    showNotification('Settings saved but failed to apply: ' + applyData.error, true);
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, true);
+            }
+        }
+        
+        // Initial load
+        loadInterfaces();
+        loadLights();
+        updateStatus();
+        
+        // Update status every 2 seconds
+        setInterval(updateStatus, 2000);
+        // Auto-refresh light status every 3 seconds
+        setInterval(loadLights, 3000);
+    </script>
+    <footer style="background: #2c3e50; color: white; padding: 20px; text-align: center; margin-top: 30px;">
+        <div style="font-size: 0.9em;">
+            <span>sACN2LIFX v{{ version }}</span>
+            <span style="margin: 0 10px;">•</span>
+            <a href="https://github.com/AlexWHughes/sACN2LIFX" target="_blank" rel="noopener noreferrer" style="color: #3498db; text-decoration: none;">
+                GitHub
+            </a>
+        </div>
+    </footer>
+</body>
+</html>
+
