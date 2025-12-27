@@ -617,6 +617,7 @@
                 configuredContainer.innerHTML = configuredLights.map(light => {
                     const mapping = light.mapping || {};
                     const isDiscovered = light.discovered !== false;
+                    const hasConfig = mapping.universe !== undefined && mapping.start_channel !== undefined && mapping.universe !== null && mapping.start_channel !== null;
                     return `
                         <div class="light-card mapped">
                             <div class="light-header">
@@ -625,9 +626,10 @@
                                     <div class="light-ip">${light.ip}</div>
                                     <div class="light-model" style="font-size: 0.85em; color: #666; margin-top: 4px;">${light.model || 'Unknown Model'}</div>
                                     ${!isDiscovered ? '<div style="font-size: 0.85em; color: #f44336; margin-top: 4px; font-weight: 600;">⚠️ Not currently discovered - click "Discover Lights" to reconnect</div>' : ''}
-                                    <div style="font-size: 0.85em; color: #4caf50; margin-top: 4px; font-weight: 600;">
+                                    ${!hasConfig ? '<div style="font-size: 0.85em; color: #ff9800; margin-top: 4px; font-weight: 600;">⚠️ Configuration needed - set Universe and Start Channel below</div>' : ''}
+                                    ${hasConfig ? `<div style="font-size: 0.85em; color: #4caf50; margin-top: 4px; font-weight: 600;">
                                         Universe ${mapping.universe}, Channel ${mapping.start_channel} (${mapping.channel_mode || 'RGB'})
-                                    </div>
+                                    </div>` : ''}
                                 </div>
                             </div>
                             <div class="mapping-form" id="edit-form-${light.id}" style="display: none;">
