@@ -176,8 +176,8 @@ def process_dmx_data(dmx_data: list, universe: int):
     if not lifx_client or not running:
         return
     
-    process_start = time.time()
     # if dmx_logger:
+    #     process_start = time.time()  # Used for timing at end of function
     #     dmx_logger.info(f"DMX received: universe={universe}, data_len={len(dmx_data)}")
     
     # Build a lookup of lights by ID for faster access
@@ -263,11 +263,12 @@ def process_dmx_data(dmx_data: list, universe: int):
             # The brightness setting (0-1) acts as a maximum brightness cap
             bright_adj = brightness
             
-            rgb_int = (int(r * 255), int(g * 255), int(b * 255))
             # if dmx_logger:
+            #     rgb_int = (int(r * 255), int(g * 255), int(b * 255))
             #     dmx_logger.info(f"  → {light.label}: RGB=({rgb_int[0]},{rgb_int[1]},{rgb_int[2]}), DMX={channel_values}, brightness={bright_adj:.2f}, fade={FADE_DURATION_MS}ms")
             
-            send_start = time.time()
+            # if dmx_logger:
+            #     send_start = time.time()
             lifx_client.set_rgb(
                 light.target,
                 light.ip,
@@ -276,9 +277,10 @@ def process_dmx_data(dmx_data: list, universe: int):
                 duration_ms=FADE_DURATION_MS,
                 brightness=bright_adj
             )
-            send_duration = (time.time() - send_start) * 1000
-            # if dmx_logger and send_duration > 5:
-            #     dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
+            # if dmx_logger:
+            #     send_duration = (time.time() - send_start) * 1000
+            #     if send_duration > 5:
+            #         dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
         
         elif channel_mode == 'RGBW':
             r = channel_values[0] / MAX_RGB_PER_COLOUR
@@ -360,9 +362,10 @@ def process_dmx_data(dmx_data: list, universe: int):
             )
     
     # Log total processing time for this DMX frame
-    # process_duration = (time.time() - process_start) * 1000
-    # if dmx_logger and process_duration > 10:
-    #     dmx_logger.warning(f"SLOW process: {process_duration:.1f}ms total for universe {universe}")
+    # if dmx_logger:
+    #     process_duration = (time.time() - process_start) * 1000  # process_start defined at function start
+    #     if process_duration > 10:
+    #         dmx_logger.warning(f"SLOW process: {process_duration:.1f}ms total for universe {universe}")
 
 
 def dmx_worker():
