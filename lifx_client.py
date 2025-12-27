@@ -168,6 +168,44 @@ class LifxLanClient:
         size = len(packet)
         return struct.pack("<H", size) + packet[2:]
 
+    def _process_state_light(self, light: LifxLight, hue: int, sat: int, bri: int, kel: int):
+        """
+        Process a STATE_LIGHT message and update light state if appropriate.
+        
+        This method implements the protection logic to prevent stale state responses
+        from overwriting recently set colours.
+        
+        Args:
+            light: The LifxLight object to update
+            hue: Hue value (0-65535)
+            sat: Saturation value (0-65535)
+            bri: Brightness value (0-65535)
+            kel: Kelvin value
+        """
+        # Only update from STATE_LIGHT if we haven't set a color recently
+        # OR if we explicitly requested the state after setting a color
+        # This prevents stale state responses from overwriting colors we just set via DMX
+        time_since_set = time.time() - light.color_set_time
+        time_since_request = time.time() - light.state_requested_time if light.state_requested_time > 0 else float('inf')
+        
+        # Use longer protection time if color was set very recently (likely DMX is actively running)
+        # This prevents stale refresh responses from overwriting actively updated colors
+        protection_time = COLOR_SET_PROTECTION_TIME_DMX if time_since_set < 2.0 else COLOR_SET_PROTECTION_TIME
+        
+        # Update if: color wasn't set recently (with appropriate protection time), OR we requested state recently
+        if time_since_set > protection_time or (light.state_requested_time > 0 and time_since_request < STATE_REQUEST_WINDOW):
+            light.current_hue = hue
+            light.current_saturation = sat
+            light.current_brightness = bri
+            light.current_kelvin = kel
+            
+            # Convert HSBK to RGB for display
+            h = hue / 65535.0
+            s = sat / 65535.0
+            v = bri / 65535.0
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
+
     def _listen(self):
         """Background thread to listen for LIFX responses"""
         while self.listening:
@@ -259,29 +297,8 @@ class LifxLanClient:
                                 bri = struct.unpack("<H", data[41:43])[0]
                                 kel = struct.unpack("<H", data[43:45])[0]
                                 
-                                # Only update from STATE_LIGHT if we haven't set a color recently
-                                # OR if we explicitly requested the state after setting a color
-                                # This prevents stale state responses from overwriting colors we just set via DMX
-                                time_since_set = time.time() - light.color_set_time
-                                time_since_request = time.time() - light.state_requested_time if light.state_requested_time > 0 else float('inf')
-                                
-                                # Use longer protection time if color was set very recently (likely DMX is actively running)
-                                # This prevents stale refresh responses from overwriting actively updated colors
-                                protection_time = COLOR_SET_PROTECTION_TIME_DMX if time_since_set < 2.0 else COLOR_SET_PROTECTION_TIME
-                                
-                                # Update if: color wasn't set recently (with appropriate protection time), OR we requested state recently
-                                if time_since_set > protection_time or (light.state_requested_time > 0 and time_since_request < STATE_REQUEST_WINDOW):
-                                    light.current_hue = hue
-                                    light.current_saturation = sat
-                                    light.current_brightness = bri
-                                    light.current_kelvin = kel
-                                    
-                                    # Convert HSBK to RGB for display
-                                    h = hue / 65535.0
-                                    s = sat / 65535.0
-                                    v = bri / 65535.0
-                                    r, g, b = colorsys.hsv_to_rgb(h, s, v)
-                                    light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
+                                # Process STATE_LIGHT using the extracted method
+                                self._process_state_light(light, hue, sat, bri, kel)
                             except Exception as e:
                                 print(f"Error parsing STATE_LIGHT for {light.ip}: {e}, data_len={len(data)}")
                     else:

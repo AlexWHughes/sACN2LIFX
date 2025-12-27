@@ -29,13 +29,13 @@ class TestLifxLight(unittest.TestCase):
     
     def test_light_all_attributes_initialized(self):
         """Test that all light attributes are properly initialized"""
-        mac = b'\x01\x02\x03\x04\x05\x06\x07\x08'
+        target = b'\x01\x02\x03\x04\x05\x06\x07\x08'
         ip = '10.0.0.50'
-        light = LifxLight(mac, ip)
+        light = LifxLight(target, ip)
         
-        self.assertEqual(light.mac, mac)
+        self.assertEqual(light.target, target)
         self.assertEqual(light.ip, ip)
-        self.assertEqual(light.label, "Unknown")
+        self.assertEqual(light.label, "")
         self.assertEqual(light.power, 0)
         self.assertEqual(light.vendor, 0)
         self.assertEqual(light.product, 0)
@@ -49,6 +49,7 @@ class TestLifxLight(unittest.TestCase):
         self.assertEqual(light.current_kelvin, lifx_client.DEFAULT_KELVIN)
         self.assertEqual(light.current_rgb, (0, 0, 0))
         self.assertEqual(light.color_set_time, 0)
+        self.assertEqual(light.state_requested_time, 0)
 
 
 class TestSetRgbColorSetTime(unittest.TestCase):
@@ -59,6 +60,10 @@ class TestSetRgbColorSetTime(unittest.TestCase):
         with patch('socket.socket'):
             self.client = LifxLanClient(bind_ip="0.0.0.0")
             self.client.listening = False  # Don't start listener thread
+            # Stop listener thread if it was started
+            if self.client.listener_thread and self.client.listener_thread.is_alive():
+                self.client.listening = False
+                self.client.listener_thread.join(timeout=0.1)
     
     def tearDown(self):
         """Clean up"""
@@ -196,6 +201,10 @@ class TestStateLightHandling(unittest.TestCase):
         with patch('socket.socket'):
             self.client = LifxLanClient(bind_ip="0.0.0.0")
             self.client.listening = False
+            # Stop listener thread if it was started
+            if hasattr(self.client, 'listener_thread') and self.client.listener_thread and self.client.listener_thread.is_alive():
+                self.client.listening = False
+                self.client.listener_thread.join(timeout=0.1)
     
     def tearDown(self):
         """Clean up"""
@@ -221,24 +230,13 @@ class TestStateLightHandling(unittest.TestCase):
         with self.client.lock:
             self.client.lights[target] = light
         
-        # Simulate STATE_LIGHT packet
+        # Simulate STATE_LIGHT packet values
         hue, sat, bri, kel = 32768, 65535, 32768, 3500
-        packet = self._create_state_light_packet(hue, sat, bri, kel)
         
-        # Manually process the STATE_LIGHT (simulating listener thread)
+        # Call the actual STATE_LIGHT processing method
         with self.client.lock:
             light = self.client.lights[target]
-            time_since_set = time.time() - getattr(light, 'color_set_time', 0)
-            if time_since_set > 1.0:
-                light.current_hue = hue
-                light.current_saturation = sat
-                light.current_brightness = bri
-                light.current_kelvin = kel
-                h = hue / 65535.0
-                s = sat / 65535.0
-                v = bri / 65535.0
-                r, g, b = colorsys.hsv_to_rgb(h, s, v)
-                light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
+            self.client._process_state_light(light, hue, sat, bri, kel)
         
         # Verify values were updated
         with self.client.lock:
@@ -269,15 +267,10 @@ class TestStateLightHandling(unittest.TestCase):
         # Simulate STATE_LIGHT packet with different values
         hue, sat, bri, kel = 50000, 60000, 40000, 5000
         
-        # Manually process the STATE_LIGHT with time check
+        # Call the actual STATE_LIGHT processing method
         with self.client.lock:
             light = self.client.lights[target]
-            time_since_set = time.time() - getattr(light, 'color_set_time', 0)
-            if time_since_set > 1.0:  # This should be False
-                light.current_hue = hue
-                light.current_saturation = sat
-                light.current_brightness = bri
-                light.current_kelvin = kel
+            self.client._process_state_light(light, hue, sat, bri, kel)
         
         # Verify values were NOT updated (kept original)
         with self.client.lock:
@@ -301,45 +294,43 @@ class TestStateLightHandling(unittest.TestCase):
         with self.client.lock:
             self.client.lights[target] = light
         
-        hue = 5000
+        hue, sat, bri, kel = 5000, 30000, 40000, 3500
         
-        # Process with time check
+        # Call the actual STATE_LIGHT processing method
+        # At exactly 1.0, should NOT update (condition is > 1.0, but protection_time logic applies)
         with self.client.lock:
             light = self.client.lights[target]
-            time_since_set = time.time() - getattr(light, 'color_set_time', 0)
-            # At exactly 1.0, should NOT update (condition is > 1.0)
-            if time_since_set > 1.0:
-                light.current_hue = hue
+            self.client._process_state_light(light, hue, sat, bri, kel)
         
-        # Verify value was NOT updated at exact boundary
+        # Verify value was NOT updated at exact boundary (protection time prevents update)
         with self.client.lock:
             updated_light = self.client.lights[target]
             self.assertEqual(updated_light.current_hue, 1000)
     
     @patch('time.time')
     def test_state_light_just_after_threshold(self, mock_time):
-        """Test STATE_LIGHT just after 1.0 second threshold"""
+        """Test STATE_LIGHT just after protection time threshold"""
         # Setup
         mock_time.return_value = 1000.0
         target = b'\x09' * 8
         ip = '192.168.1.108'
         light = LifxLight(target, ip)
-        light.color_set_time = 998.99  # 1.01 seconds ago (just past threshold)
+        # Set color 6 seconds ago (past the 5 second DMX protection time)
+        # This tests the case where time_since_set > COLOR_SET_PROTECTION_TIME_DMX
+        light.color_set_time = 994.0  # 6.0 seconds ago
         light.current_hue = 1000
         
         with self.client.lock:
             self.client.lights[target] = light
         
-        hue = 5000
+        hue, sat, bri, kel = 5000, 30000, 40000, 3500
         
-        # Process with time check
+        # Call the actual STATE_LIGHT processing method
         with self.client.lock:
             light = self.client.lights[target]
-            time_since_set = time.time() - getattr(light, 'color_set_time', 0)
-            if time_since_set > 1.0:
-                light.current_hue = hue
+            self.client._process_state_light(light, hue, sat, bri, kel)
         
-        # Verify value WAS updated just after threshold
+        # Verify value WAS updated after protection time
         with self.client.lock:
             updated_light = self.client.lights[target]
             self.assertEqual(updated_light.current_hue, 5000)
@@ -352,23 +343,21 @@ class TestStateLightHandling(unittest.TestCase):
         target = b'\x0A' * 8
         ip = '192.168.1.109'
         light = LifxLight(target, ip)
-        # Simulate old light object without color_set_time
-        delattr(light, 'color_set_time')
+        # Simulate old light object without color_set_time (set to 0, which is old enough)
+        light.color_set_time = 0
         
         with self.client.lock:
             self.client.lights[target] = light
         
-        hue = 5000
+        hue, sat, bri, kel = 5000, 30000, 40000, 3500
         
-        # Process with getattr fallback
+        # Call the actual STATE_LIGHT processing method
+        # color_set_time of 0 means time_since_set will be large, should update
         with self.client.lock:
             light = self.client.lights[target]
-            time_since_set = time.time() - getattr(light, 'color_set_time', 0)
-            # getattr returns 0, so time_since_set will be large, should update
-            if time_since_set > 1.0:
-                light.current_hue = hue
+            self.client._process_state_light(light, hue, sat, bri, kel)
         
-        # Verify value was updated (getattr default of 0 makes time_since_set large)
+        # Verify value was updated (color_set_time of 0 makes time_since_set large)
         with self.client.lock:
             updated_light = self.client.lights[target]
             self.assertEqual(updated_light.current_hue, 5000)
@@ -395,22 +384,11 @@ class TestStateLightHandling(unittest.TestCase):
         for hue, sat, bri, kel in test_cases:
             with self.client.lock:
                 light = self.client.lights[target]
-                # Simulate old color_set_time to allow update
+                # Ensure old color_set_time to allow update
                 light.color_set_time = 0
                 
-                # Simulate STATE_LIGHT processing
-                time_since_set = time.time() - getattr(light, 'color_set_time', 0)
-                if time_since_set > 1.0:
-                    light.current_hue = hue
-                    light.current_saturation = sat
-                    light.current_brightness = bri
-                    light.current_kelvin = kel
-                    
-                    h = hue / 65535.0
-                    s = sat / 65535.0
-                    v = bri / 65535.0
-                    r, g, b = colorsys.hsv_to_rgb(h, s, v)
-                    light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
+                # Call the actual STATE_LIGHT processing method
+                self.client._process_state_light(light, hue, sat, bri, kel)
                 
                 # Verify RGB conversion
                 self.assertIsNotNone(light.current_rgb)
@@ -449,20 +427,20 @@ class TestHelperFunctions(unittest.TestCase):
     def test_rgb01_to_hsbk_pure_colors(self):
         """Test rgb01_to_hsbk with pure RGB colors"""
         # Red
-        hue, sat, bri, kel = rgb01_to_hsbk(1.0, 0.0, 0.0)
+        hue, sat, bri, _kel = rgb01_to_hsbk(1.0, 0.0, 0.0)
         self.assertEqual(hue, 0)
         self.assertEqual(sat, 65535)
         self.assertEqual(bri, 65535)
         
         # Green
-        hue, sat, bri, kel = rgb01_to_hsbk(0.0, 1.0, 0.0)
+        hue, sat, bri, _kel = rgb01_to_hsbk(0.0, 1.0, 0.0)
         self.assertGreater(hue, 20000)  # Approximately 1/3 of 65535
         self.assertLess(hue, 23000)
         self.assertEqual(sat, 65535)
         self.assertEqual(bri, 65535)
         
         # Blue
-        hue, sat, bri, kel = rgb01_to_hsbk(0.0, 0.0, 1.0)
+        hue, sat, bri, _kel = rgb01_to_hsbk(0.0, 0.0, 1.0)
         self.assertGreater(hue, 40000)  # Approximately 2/3 of 65535
         self.assertLess(hue, 46000)
         self.assertEqual(sat, 65535)
@@ -470,13 +448,13 @@ class TestHelperFunctions(unittest.TestCase):
     
     def test_rgb01_to_hsbk_white(self):
         """Test rgb01_to_hsbk with white (no saturation)"""
-        hue, sat, bri, kel = rgb01_to_hsbk(1.0, 1.0, 1.0)
+        _hue, sat, bri, _kel = rgb01_to_hsbk(1.0, 1.0, 1.0)
         self.assertEqual(sat, 0)  # No saturation for white
         self.assertEqual(bri, 65535)  # Full brightness
     
     def test_rgb01_to_hsbk_black(self):
         """Test rgb01_to_hsbk with black"""
-        hue, sat, bri, kel = rgb01_to_hsbk(0.0, 0.0, 0.0)
+        _hue, _sat, bri, _kel = rgb01_to_hsbk(0.0, 0.0, 0.0)
         self.assertEqual(bri, 0)  # No brightness for black
     
     def test_rgb01_to_hsbk_gray(self):
@@ -500,11 +478,11 @@ class TestHelperFunctions(unittest.TestCase):
     def test_rgb01_to_hsbk_clamping(self):
         """Test that rgb01_to_hsbk clamps input values"""
         # Values above 1.0 should be clamped
-        hue, sat, bri, kel = rgb01_to_hsbk(2.0, 2.0, 2.0)
+        _hue, _sat, bri, _kel = rgb01_to_hsbk(2.0, 2.0, 2.0)
         self.assertEqual(bri, 65535)  # Should be clamped to max
         
         # Values below 0.0 should be clamped
-        hue, sat, bri, kel = rgb01_to_hsbk(-1.0, -1.0, -1.0)
+        _hue, _sat, bri, _kel = rgb01_to_hsbk(-1.0, -1.0, -1.0)
         self.assertEqual(bri, 0)  # Should be clamped to min
     
     def test_rgb01_to_hsbk_return_types(self):

@@ -2,13 +2,26 @@
 
 Control LIFX lights via sACN/E1.31 with automatic discovery and web-based mapping interface.
 
+![sACN2LIFX Interface](templates/Example.png)
+
 ## Features
 
-- **Automatic LIFX Discovery**: Automatically discovers all LIFX lights on your network
-- **Web UI**: Simple web interface for mapping lights to DMX universes and channels
-- **E1.31 Support**: Receives DMX data via sACN (E1.31) protocol
-- **Persistent Mappings**: Saves your light mappings to disk
-- **Brightness Control**: Per-light brightness adjustment
+- **Automatic LIFX Discovery**: Automatically discovers all LIFX lights on your network using the LIFX LAN protocol
+- **Web UI**: Clean, intuitive web interface for mapping lights to DMX universes and channels
+- **E1.31/sACN Support**: Receives DMX data via sACN (E1.31) protocol with real-time status monitoring
+- **Test RGB Mode**: Test lights directly without DMX input - useful for debugging and verification
+- **Network Interface Selection**: Choose specific network interfaces for LIFX discovery and sACN reception
+- **Manual Light Addition**: Add lights by IP address if they're not discoverable automatically
+- **Persistent Mappings**: Automatically saves your light mappings and settings to `config.json`
+- **Per-Light Brightness Control**: Adjust brightness multiplier (0-100%) for each light individually
+- **Real-Time Status**: Live DMX reception status showing active universes and packet counts
+- **Channel Mode Support**: RGB channel mode (3 channels per light)
+- **Optimized Performance**: 
+  - 20ms fade duration for smooth 40Hz sACN transitions
+  - 50Hz LIFX command rate limit for responsive updates
+  - Value change threshold to minimize unnecessary updates
+- **Configuration Reload**: Reload configuration from disk without restarting the application
+- **Thread-Safe**: Robust multi-threaded architecture for reliable DMX processing
 
 ## Installation
 
@@ -26,18 +39,38 @@ python app.py
 
 2. Open your browser to `http://localhost:5001`
 
-3. Click "Discover Lights" to find all LIFX devices on your network
+3. **Configure Network Interfaces** (if needed):
+   - Select the network interface for LIFX light discovery
+   - Select the network interface for sACN (DMX) reception
+   - Click "Save & Apply Settings"
 
-4. For each light, configure:
+4. **Discover Lights**:
+   - Click "Discover Lights" to find all LIFX devices on your network
+   - Lights will appear in the "Discovered Lights" section
+
+5. **Configure Light Mappings**:
+   For each light, configure:
    - **Universe**: The DMX universe number (typically 1-512)
    - **Start Channel**: The first DMX channel for this light (RGB uses 3 channels)
-   - **Brightness**: Overall brightness multiplier (0.0 - 1.0)
+   - **Brightness**: Overall brightness multiplier (0-100%)
+   - **Channel Mode**: Currently supports RGB (3 channels)
 
-5. Click "Start DMX" to begin processing DMX data
+6. **Test Lights** (Optional):
+   - Use the "Test RGB (DMX-less)" section to test lights directly
+   - Enter RGB values (0-255) or use quick color buttons
+   - Adjust brightness and click "Test" to send colour to the light
+
+7. **Start DMX Processing**:
+   - Click "Start DMX" to begin processing sACN data
+   - Monitor the status bar for DMX reception status
+   - Active universes and packet counts are displayed in real-time
+
+8. **Stop DMX Processing**:
+   - Click "Stop DMX" to halt DMX processing while keeping the server running
 
 ## DMX Channel Mapping
 
-Each light uses 3 consecutive DMX channels:
+Each light uses 3 consecutive DMX channels for RGB mode:
 - Channel N: Red (0-255)
 - Channel N+1: Green (0-255)
 - Channel N+2: Blue (0-255)
@@ -47,13 +80,51 @@ For example, if a light is mapped to Universe 1, Channel 1:
 - Channel 2 = Green
 - Channel 3 = Blue
 
+## Test RGB Mode
+
+The "Test RGB (DMX-less)" feature allows you to:
+- Test lights without requiring sACN/DMX input
+- Debug refresh and smoothness issues
+- Verify light connectivity and colour accuracy
+- Quickly test different RGB values and brightness levels
+
+Simply enter RGB values (0-255), adjust brightness (0-100%), and click "Test" to send the colour directly to the configured light.
+
 ## Configuration
 
-Mappings and settings are automatically saved to `config.json` in the project directory.
+Mappings and settings are automatically saved to `config.json` in the project directory. The configuration includes:
+- Light mappings (universe, start channel, brightness, channel mode)
+- Network interface settings (LIFX and sACN interfaces)
+- Light labels and IP addresses
+
+You can reload the configuration without restarting the application using the "Reload Config" button.
+
+## Performance Tuning
+
+The application is optimized for smooth 40Hz sACN input:
+- **Fade Duration**: 20ms (configurable via `FADE_DURATION_MS`)
+- **LIFX Rate Limit**: 50Hz (20ms minimum interval between commands)
+- **Value Change Threshold**: 1 DMX value (only updates if change exceeds threshold)
+
+These settings can be adjusted in `app.py` if needed for different sACN frame rates.
 
 ## Requirements
 
 - Python 3.7+
 - LIFX lights on the same network
 - DMX/E1.31 source (e.g., lighting console, software)
+- Network interface with multicast support for sACN
 
+## Technical Details
+
+- **Protocol**: sACN (E1.31) for DMX reception, LIFX LAN Protocol for light control
+- **Threading**: Multi-threaded architecture with proper synchronization for DMX processing
+- **State Management**: Thread-safe state updates with protection against race conditions
+- **Error Handling**: Robust error handling with graceful degradation
+
+## Troubleshooting
+
+- **Lights not discovered**: Ensure lights are on the same network and powered on. Try using "Manually Add Light" with the light's IP address.
+- **DMX not receiving**: Check that the sACN interface is correctly configured and that your DMX source is sending to the correct universe.
+- **Stepping/jerky transitions**: The application is optimized for 40Hz sACN. If using a different frame rate, you may need to adjust `FADE_DURATION_MS` and `VALUE_CHANGE_THRESHOLD` in `app.py`.
+- **Configuration not saving**: Ensure the application has write permissions in the project directory.

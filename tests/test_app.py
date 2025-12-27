@@ -97,8 +97,8 @@ class TestRestartDmxIfRunning(unittest.TestCase):
         mock_receiver.stop.assert_called_once()
         mock_receiver.reset_stats.assert_called_once()
         
-        # Verify thread was joined
-        mock_thread.is_alive.assert_called_once()
+        # Verify thread was joined (is_alive may be called multiple times)
+        self.assertGreaterEqual(mock_thread.is_alive.call_count, 1)
         mock_thread.join.assert_called_once_with(timeout=1.0)
         
         # Verify old receiver was closed

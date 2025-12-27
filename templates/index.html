@@ -296,6 +296,18 @@
             </div>
             
             <div class="section">
+                <h2>Test RGB (DMX-less)</h2>
+                <div style="background: #f9f9f9; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
+                    <p style="margin-bottom: 15px; color: #666; font-size: 0.9em;">
+                        Test RGB values directly on configured lights without DMX. Useful for debugging refresh issues.
+                    </p>
+                    <div id="testRgbContainer" style="display: grid; gap: 15px;">
+                        <!-- Test RGB controls will be rendered here -->
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
                 <h2>Manually Add Light</h2>
                 <div style="background: #f9f9f9; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
                     <p style="margin-bottom: 15px; color: #666; font-size: 0.9em;">
@@ -682,6 +694,9 @@
                 }).join('');
             }
             
+            // Render test RGB controls for configured lights
+            renderTestRgbControls(allConfiguredLights);
+            
             // Render discovered (unconfigured) lights
             if (unconfiguredLights.length === 0) {
                 discoveredContainer.innerHTML = '<div class="empty-state">All discovered lights are configured.</div>';
@@ -834,6 +849,210 @@
                 showNotification('Error: ' + error.message, true);
             }
         }
+        function renderTestRgbControls(configuredLights) {
+            const container = document.getElementById('testRgbContainer');
+            if (!container) return;
+            
+            if (!configuredLights || configuredLights.length === 0) {
+                container.innerHTML = '<div class="empty-state">No configured lights to test. Configure a light first.</div>';
+                return;
+            }
+            
+            container.innerHTML = configuredLights.map(light => {
+                return `
+                    <div style="background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 15px;">
+                        <div style="font-weight: 600; margin-bottom: 12px; color: #333;">${light.label}</div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 10px; align-items: end;">
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label style="font-size: 0.85em;">Red (0-255)</label>
+                                <input type="number" id="test-r-${light.id}" value="0" min="0" max="255" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label style="font-size: 0.85em;">Green (0-255)</label>
+                                <input type="number" id="test-g-${light.id}" value="0" min="0" max="255" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label style="font-size: 0.85em;">Blue (0-255)</label>
+                                <input type="number" id="test-b-${light.id}" value="0" min="0" max="255" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label style="font-size: 0.85em;">Brightness (0-100%)</label>
+                                <input type="number" id="test-brightness-${light.id}" value="100" min="0" max="100" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                            </div>
+                            <button class="btn btn-primary btn-small" onclick="testRgb('${light.id}')" style="padding: 8px 16px;">Test</button>
+                        </div>
+                        <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
+                            <button class="btn btn-small" onclick="setTestColor('${light.id}', 255, 0, 0)" style="background: #f44336; color: white; padding: 6px 12px; font-size: 0.85em;">Red</button>
+                            <button class="btn btn-small" onclick="setTestColor('${light.id}', 0, 255, 0)" style="background: #4caf50; color: white; padding: 6px 12px; font-size: 0.85em;">Green</button>
+                            <button class="btn btn-small" onclick="setTestColor('${light.id}', 0, 0, 255)" style="background: #2196f3; color: white; padding: 6px 12px; font-size: 0.85em;">Blue</button>
+                            <button class="btn btn-small" onclick="setTestColor('${light.id}', 255, 255, 255)" style="background: #fff; color: #333; border: 1px solid #ddd; padding: 6px 12px; font-size: 0.85em;">White</button>
+                            <button class="btn btn-small" onclick="setTestColor('${light.id}', 0, 0, 0)" style="background: #333; color: white; padding: 6px 12px; font-size: 0.85em;">Black</button>
+                            <button class="btn btn-small" id="chase-btn-${light.id}" onclick="toggleRgbChase('${light.id}')" style="background: #ff9800; color: white; padding: 6px 12px; font-size: 0.85em;">RGB Chase</button>
+                            <button class="btn btn-small" id="sinewave-btn-${light.id}" onclick="toggleSinewave('${light.id}')" style="background: #9c27b0; color: white; padding: 6px 12px; font-size: 0.85em;">Sinewave</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        function setTestColor(lightId, r, g, b) {
+            document.getElementById(`test-r-${lightId}`).value = r;
+            document.getElementById(`test-g-${lightId}`).value = g;
+            document.getElementById(`test-b-${lightId}`).value = b;
+            testRgb(lightId);
+        }
+        
+        // Store animation intervals
+        const animationIntervals = {};
+        const animationStates = {};
+        
+        async function testRgb(lightId) {
+            const r = parseInt(document.getElementById(`test-r-${lightId}`).value) || 0;
+            const g = parseInt(document.getElementById(`test-g-${lightId}`).value) || 0;
+            const b = parseInt(document.getElementById(`test-b-${lightId}`).value) || 0;
+            const brightness = (parseInt(document.getElementById(`test-brightness-${lightId}`).value) || 100) / 100.0;
+            
+            try {
+                const response = await fetch('/api/lights/test-rgb', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        light_id: lightId,
+                        r: r,
+                        g: g,
+                        b: b,
+                        brightness: brightness,
+                        fade_ms: 20
+                    })
+                });
+                
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
+                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
+                }
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showNotification(`Sent RGB(${r},${g},${b}) to ${data.light_label}`);
+                } else {
+                    showNotification('Failed to send RGB: ' + data.error, true);
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, true);
+            }
+        }
+        
+        function stopAnimation(lightId, animationType) {
+            const key = `${lightId}-${animationType}`;
+            if (animationIntervals[key]) {
+                clearInterval(animationIntervals[key]);
+                delete animationIntervals[key];
+                delete animationStates[key];
+            }
+        }
+        
+        function toggleRgbChase(lightId) {
+            const key = `${lightId}-chase`;
+            const btn = document.getElementById(`chase-btn-${lightId}`);
+            
+            // Stop sinewave if running
+            stopAnimation(lightId, 'sinewave');
+            const sinewaveBtn = document.getElementById(`sinewave-btn-${lightId}`);
+            if (sinewaveBtn) {
+                sinewaveBtn.textContent = 'Sinewave';
+                sinewaveBtn.style.background = '#9c27b0';
+            }
+            
+            if (animationIntervals[key]) {
+                // Stop chase
+                stopAnimation(lightId, 'chase');
+                btn.textContent = 'RGB Chase';
+                btn.style.background = '#ff9800';
+            } else {
+                // Start chase
+                const colors = [
+                    { r: 255, g: 0, b: 0 },   // Red
+                    { r: 0, g: 255, b: 0 },   // Green
+                    { r: 0, g: 0, b: 255 }    // Blue
+                ];
+                let colorIndex = 0;
+                
+                // Set initial color
+                const initialColor = colors[colorIndex];
+                document.getElementById(`test-r-${lightId}`).value = initialColor.r;
+                document.getElementById(`test-g-${lightId}`).value = initialColor.g;
+                document.getElementById(`test-b-${lightId}`).value = initialColor.b;
+                testRgb(lightId);
+                
+                animationIntervals[key] = setInterval(() => {
+                    colorIndex = (colorIndex + 1) % colors.length;
+                    const color = colors[colorIndex];
+                    document.getElementById(`test-r-${lightId}`).value = color.r;
+                    document.getElementById(`test-g-${lightId}`).value = color.g;
+                    document.getElementById(`test-b-${lightId}`).value = color.b;
+                    testRgb(lightId);
+                }, 500); // 0.5 seconds between each
+                
+                btn.textContent = 'Stop Chase';
+                btn.style.background = '#f44336';
+            }
+        }
+        
+        function toggleSinewave(lightId) {
+            const key = `${lightId}-sinewave`;
+            const btn = document.getElementById(`sinewave-btn-${lightId}`);
+            
+            // Stop chase if running
+            stopAnimation(lightId, 'chase');
+            const chaseBtn = document.getElementById(`chase-btn-${lightId}`);
+            if (chaseBtn) {
+                chaseBtn.textContent = 'RGB Chase';
+                chaseBtn.style.background = '#ff9800';
+            }
+            
+            if (animationIntervals[key]) {
+                // Stop sinewave
+                stopAnimation(lightId, 'sinewave');
+                btn.textContent = 'Sinewave';
+                btn.style.background = '#9c27b0';
+            } else {
+                // Start sinewave
+                if (!animationStates[key]) {
+                    animationStates[key] = { phase: 0 };
+                }
+                
+                const state = animationStates[key];
+                const updateInterval = 50; // Update every 50ms for smooth animation
+                const speed = 0.02; // Speed of sinewave (adjust for faster/slower)
+                
+                animationIntervals[key] = setInterval(() => {
+                    state.phase += speed;
+                    if (state.phase >= Math.PI * 2) {
+                        state.phase -= Math.PI * 2;
+                    }
+                    
+                    // Calculate RGB using sine waves with phase offsets
+                    // Red: sine wave starting at 0
+                    // Green: sine wave starting at 2π/3 (120 degrees)
+                    // Blue: sine wave starting at 4π/3 (240 degrees)
+                    const r = Math.floor((Math.sin(state.phase) + 1) / 2 * 255);
+                    const g = Math.floor((Math.sin(state.phase + (2 * Math.PI / 3)) + 1) / 2 * 255);
+                    const b = Math.floor((Math.sin(state.phase + (4 * Math.PI / 3)) + 1) / 2 * 255);
+                    
+                    document.getElementById(`test-r-${lightId}`).value = r;
+                    document.getElementById(`test-g-${lightId}`).value = g;
+                    document.getElementById(`test-b-${lightId}`).value = b;
+                    testRgb(lightId);
+                }, updateInterval);
+                
+                btn.textContent = 'Stop Sinewave';
+                btn.style.background = '#f44336';
+            }
+        }
+        
         async function reloadConfig() {
             try {
                 const response = await fetch('/api/config/reload', { method: 'POST' });

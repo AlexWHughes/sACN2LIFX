@@ -16,14 +16,15 @@ from flask import Flask, render_template, jsonify, request
 from lifx_client import LifxLanClient, LifxLight
 from dmx_receiver import DMXReceiver
 
-# Set up logging for DMX to LIFX traffic
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S'
-)
-dmx_logger = logging.getLogger('dmx_lifx')
-dmx_logger.setLevel(logging.INFO)
+# Set up logging for DMX to LIFX traffic (DISABLED for now)
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format='%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
+#     datefmt='%H:%M:%S'
+# )
+# dmx_logger = logging.getLogger('dmx_lifx')
+# dmx_logger.setLevel(logging.INFO)
+dmx_logger = None  # Disabled for now
 
 try:
     import netifaces
@@ -173,7 +174,8 @@ def process_dmx_data(dmx_data: list, universe: int):
         return
     
     process_start = time.time()
-    dmx_logger.info(f"DMX received: universe={universe}, data_len={len(dmx_data)}")
+    # if dmx_logger:
+    #     dmx_logger.info(f"DMX received: universe={universe}, data_len={len(dmx_data)}")
     
     # Build a lookup of lights by ID for faster access
     # First try filtered lights (excludes switches)
@@ -236,7 +238,8 @@ def process_dmx_data(dmx_data: list, universe: int):
                     has_significant_change = True
                     break
             if not has_significant_change:
-                dmx_logger.debug(f"  SKIP {light.label}: change={max_change:.1f} < threshold={VALUE_CHANGE_THRESHOLD}, values={channel_values}")
+                # if dmx_logger:
+                #     dmx_logger.debug(f"  SKIP {light.label}: change={max_change:.1f} < threshold={VALUE_CHANGE_THRESHOLD}, values={channel_values}")
                 continue  # Skip update if change is too small
         
         # Store current values
@@ -258,7 +261,8 @@ def process_dmx_data(dmx_data: list, universe: int):
             bright_adj = brightness
             
             rgb_int = (int(r * 255), int(g * 255), int(b * 255))
-            dmx_logger.info(f"  → {light.label}: RGB=({rgb_int[0]},{rgb_int[1]},{rgb_int[2]}), DMX={channel_values}, brightness={bright_adj:.2f}, fade={FADE_DURATION_MS}ms")
+            # if dmx_logger:
+            #     dmx_logger.info(f"  → {light.label}: RGB=({rgb_int[0]},{rgb_int[1]},{rgb_int[2]}), DMX={channel_values}, brightness={bright_adj:.2f}, fade={FADE_DURATION_MS}ms")
             
             send_start = time.time()
             lifx_client.set_rgb(
@@ -270,8 +274,8 @@ def process_dmx_data(dmx_data: list, universe: int):
                 brightness=bright_adj
             )
             send_duration = (time.time() - send_start) * 1000
-            if send_duration > 5:
-                dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
+            # if dmx_logger and send_duration > 5:
+            #     dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
         
         elif channel_mode == 'RGBW':
             r = channel_values[0] / MAX_RGB_PER_COLOUR
@@ -353,9 +357,9 @@ def process_dmx_data(dmx_data: list, universe: int):
             )
     
     # Log total processing time for this DMX frame
-    process_duration = (time.time() - process_start) * 1000
-    if process_duration > 10:
-        dmx_logger.warning(f"SLOW process: {process_duration:.1f}ms total for universe {universe}")
+    # process_duration = (time.time() - process_start) * 1000
+    # if dmx_logger and process_duration > 10:
+    #     dmx_logger.warning(f"SLOW process: {process_duration:.1f}ms total for universe {universe}")
 
 
 def dmx_worker():
@@ -976,6 +980,82 @@ def get_status():
         'mappings_count': len(light_mappings),
         'dmx_stats': dmx_stats
     })
+
+
+@app.route('/api/lights/test-rgb', methods=['POST'])
+def test_rgb():
+    """Test RGB values directly on a light (DMX-less testing)"""
+    global lifx_client
+    
+    if not lifx_client:
+        return jsonify({'success': False, 'error': 'LIFX client not initialized'}), 400
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({'success': False, 'error': 'Request body is required'}), 400
+    
+    requested_light_id = data.get('light_id')
+    r = data.get('r', 0)
+    g = data.get('g', 0)
+    b = data.get('b', 0)
+    brightness = data.get('brightness', 1.0)
+    fade_ms = data.get('fade_ms', FADE_DURATION_MS)
+    
+    if not requested_light_id:
+        return jsonify({'success': False, 'error': 'light_id is required'}), 400
+    
+    # Validate RGB values (0-255)
+    if not (0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255):
+        return jsonify({'success': False, 'error': 'RGB values must be 0-255'}), 400
+    
+    # Validate brightness (0.0-1.0)
+    if not (0.0 <= brightness <= 1.0):
+        return jsonify({'success': False, 'error': 'Brightness must be 0.0-1.0'}), 400
+    
+    # Find the light
+    lights = lifx_client.get_lights()
+    light = None
+    for l in lights:
+        if light_id(l) == requested_light_id:
+            light = l
+            break
+    
+    # Also check raw lights for configured lights (e.g., LIFX Switch that was filtered out)
+    if not light:
+        with lifx_client.lock:
+            for target, l in lifx_client.lights.items():
+                if light_id(l) == requested_light_id:
+                    light = l
+                    break
+    
+    if not light:
+        return jsonify({'success': False, 'error': 'Light not found'}), 404
+    
+    try:
+        # Convert RGB from 0-255 to 0.0-1.0
+        r_norm = r / 255.0
+        g_norm = g / 255.0
+        b_norm = b / 255.0
+        
+        # Send RGB to light
+        lifx_client.set_rgb(
+            light.target,
+            light.ip,
+            r_norm, g_norm, b_norm,
+            kelvin=DEFAULT_KELVIN,
+            duration_ms=fade_ms,
+            brightness=brightness
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': f'Sent RGB({r},{g},{b}) to {light.label}',
+            'light_label': light.label
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 def auto_discover_configured_lights():
