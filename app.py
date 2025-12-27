@@ -1248,14 +1248,20 @@ def test_rgb():
         b_norm = b / 255.0
         
         # Send RGB to light
-        lifx_client.set_rgb(
-            light.target,
-            light.ip,
-            r_norm, g_norm, b_norm,
-            kelvin=DEFAULT_KELVIN,
-            duration_ms=fade_ms,
-            brightness=brightness
-        )
+        try:
+            lifx_client.set_rgb(
+                light.target,
+                light.ip,
+                r_norm, g_norm, b_norm,
+                kelvin=DEFAULT_KELVIN,
+                duration_ms=fade_ms,
+                brightness=brightness
+            )
+        except Exception as set_rgb_error:
+            import traceback
+            print(f"Error in set_rgb: {set_rgb_error}")
+            traceback.print_exc()
+            return jsonify({'success': False, 'error': f'Failed to send RGB: {str(set_rgb_error)}'}), 500
         
         return jsonify({
             'success': True,
@@ -1264,6 +1270,7 @@ def test_rgb():
         })
     except Exception as e:
         import traceback
+        print(f"Error in test_rgb endpoint: {e}")
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 

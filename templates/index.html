@@ -533,11 +533,16 @@
         
         async function loadLights() {
             try {
+                console.log('loadLights: Starting...');
                 // Save form values before re-rendering
                 const savedData = saveFormValues();
+                console.log('loadLights: Form values saved');
                 
+                console.log('loadLights: Fetching /api/lights...');
                 const response = await fetch('/api/lights');
+                console.log('loadLights: Response received:', response.status);
                 const data = await response.json();
+                console.log('loadLights: Data parsed:', data.success, 'configured:', data.configured_lights?.length);
                 
                 if (data.success) {
                     lights = data.lights; // Keep for backward compatibility
@@ -899,10 +904,25 @@
         }
         
         function setTestColor(lightId, r, g, b) {
-            document.getElementById(`test-r-${lightId}`).value = r;
-            document.getElementById(`test-g-${lightId}`).value = g;
-            document.getElementById(`test-b-${lightId}`).value = b;
-            testRgb(lightId);
+            console.log('setTestColor called:', lightId, r, g, b);
+            const rEl = document.getElementById(`test-r-${lightId}`);
+            const gEl = document.getElementById(`test-g-${lightId}`);
+            const bEl = document.getElementById(`test-b-${lightId}`);
+            
+            if (!rEl || !gEl || !bEl) {
+                console.error('setTestColor: DOM elements not found for light', lightId);
+                showNotification('Error: Light controls not found', true);
+                return;
+            }
+            
+            rEl.value = r;
+            gEl.value = g;
+            bEl.value = b;
+            console.log('setTestColor: Calling testRgb for', lightId);
+            testRgb(lightId).catch(err => {
+                console.error('setTestColor: testRgb failed:', err);
+                showNotification('Error: ' + err.message, true);
+            });
         }
         
         // Store animation intervals
@@ -943,26 +963,66 @@
         }
         
         async function testRgb(lightId, suppressNotifications = false) {
-            const r = parseInt(document.getElementById(`test-r-${lightId}`).value) || 0;
-            const g = parseInt(document.getElementById(`test-g-${lightId}`).value) || 0;
-            const b = parseInt(document.getElementById(`test-b-${lightId}`).value) || 0;
-            const brightness = (parseInt(document.getElementById(`test-brightness-${lightId}`).value) || 100) / 100.0;
+            console.log('testRgb called:', lightId, 'suppressNotifications:', suppressNotifications);
+            
+            // Check if DOM elements exist before accessing them
+            const rEl = document.getElementById(`test-r-${lightId}`);
+            const gEl = document.getElementById(`test-g-${lightId}`);
+            const bEl = document.getElementById(`test-b-${lightId}`);
+            const brightnessEl = document.getElementById(`test-brightness-${lightId}`);
+            
+            // If elements don't exist, stop the animation silently
+            if (!rEl || !gEl || !bEl) {
+                console.warn(`testRgb: DOM elements not found for light ${lightId}, stopping animation`);
+                // Stop any running animations for this light
+                stopAnimation(lightId, 'chase');
+                stopAnimation(lightId, 'sinewave');
+                return;
+            }
+            
+            const r = parseInt(rEl.value) || 0;
+            const g = parseInt(gEl.value) || 0;
+            const b = parseInt(bEl.value) || 0;
+            const brightness = (parseInt(brightnessEl?.value) || 100) / 100.0;
+            
+            console.log('testRgb: Sending request with values:', { lightId, r, g, b, brightness });
             
             try {
-                const response = await fetch('/api/lights/test-rgb', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        light_id: lightId,
-                        r: r,
-                        g: g,
-                        b: b,
-                        brightness: brightness,
-                        fade_ms: 20
-                    })
-                });
+                const requestBody = {
+                    light_id: lightId,
+                    r: r,
+                    g: g,
+                    b: b,
+                    brightness: brightness,
+                    fade_ms: 20
+                };
+                console.log('testRgb: Request body:', requestBody);
                 
+                let response;
+                try {
+                    console.log('testRgb: Sending fetch request...');
+                    response = await fetch('/api/lights/test-rgb', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(requestBody)
+                    });
+                    console.log('testRgb: Response received - status:', response.status, response.statusText);
+                } catch (fetchError) {
+                    console.error('testRgb: Fetch failed:', fetchError);
+                    console.error('testRgb: Fetch error stack:', fetchError.stack);
+                    throw new Error('Network error: ' + fetchError.message);
+                }
+                
+                if (!response.ok) {
+                    console.error('testRgb: Response not OK:', response.status, response.statusText);
+                    const errorText = await response.text().catch(() => 'Unknown error');
+                    console.error('testRgb: Error response body:', errorText);
+                    throw new Error(`Server error (${response.status}): ${errorText}`);
+                }
+                
+                console.log('testRgb: Parsing JSON response...');
                 const data = await validateJsonResponse(response);
+                console.log('testRgb: Response data:', JSON.stringify(data));
                 
                 if (data.success) {
                     // Only show notification if not suppressed (i.e., manual testing)
@@ -971,10 +1031,13 @@
                     }
                 } else {
                     // Always show errors, even during animations
-                    showNotification('Failed to send RGB: ' + data.error, true);
+                    console.error('testRgb failed:', data.error);
+                    showNotification('Failed to send RGB: ' + (data.error || 'Unknown error'), true);
                 }
             } catch (error) {
                 // Always show errors, even during animations
+                console.error('testRgb exception:', error);
+                console.error('testRgb exception stack:', error.stack);
                 showNotification('Error: ' + error.message, true);
             }
         }
@@ -1045,18 +1108,38 @@
                 
                 // Set initial color
                 const initialColor = colors[colorIndex];
-                document.getElementById(`test-r-${lightId}`).value = initialColor.r;
-                document.getElementById(`test-g-${lightId}`).value = initialColor.g;
-                document.getElementById(`test-b-${lightId}`).value = initialColor.b;
+                const rEl = document.getElementById(`test-r-${lightId}`);
+                const gEl = document.getElementById(`test-g-${lightId}`);
+                const bEl = document.getElementById(`test-b-${lightId}`);
+                
+                if (!rEl || !gEl || !bEl) {
+                    console.warn(`toggleRgbChase: DOM elements not found for light ${lightId}`);
+                    return;
+                }
+                
+                rEl.value = initialColor.r;
+                gEl.value = initialColor.g;
+                bEl.value = initialColor.b;
                 testRgb(lightId, true); // Send initial color immediately, suppress notifications
                 
                 const updateInterval = getAnimationUpdateInterval();
                 animationIntervals[key] = setInterval(() => {
+                    // Check if elements still exist before updating
+                    const rEl = document.getElementById(`test-r-${lightId}`);
+                    const gEl = document.getElementById(`test-g-${lightId}`);
+                    const bEl = document.getElementById(`test-b-${lightId}`);
+                    
+                    if (!rEl || !gEl || !bEl) {
+                        // Elements removed, stop animation
+                        stopAnimation(lightId, 'chase');
+                        return;
+                    }
+                    
                     colorIndex = (colorIndex + 1) % colors.length;
                     const color = colors[colorIndex];
-                    document.getElementById(`test-r-${lightId}`).value = color.r;
-                    document.getElementById(`test-g-${lightId}`).value = color.g;
-                    document.getElementById(`test-b-${lightId}`).value = color.b;
+                    rEl.value = color.r;
+                    gEl.value = color.g;
+                    bEl.value = color.b;
                     testRgbThrottled(lightId); // Use throttled version
                 }, updateInterval);
                 
@@ -1097,13 +1180,34 @@
                 const initialR = Math.floor((Math.sin(state.phase) + 1) / 2 * 255);
                 const initialG = Math.floor((Math.sin(state.phase + (2 * Math.PI / 3)) + 1) / 2 * 255);
                 const initialB = Math.floor((Math.sin(state.phase + (4 * Math.PI / 3)) + 1) / 2 * 255);
-                document.getElementById(`test-r-${lightId}`).value = initialR;
-                document.getElementById(`test-g-${lightId}`).value = initialG;
-                document.getElementById(`test-b-${lightId}`).value = initialB;
+                
+                const rEl = document.getElementById(`test-r-${lightId}`);
+                const gEl = document.getElementById(`test-g-${lightId}`);
+                const bEl = document.getElementById(`test-b-${lightId}`);
+                
+                if (!rEl || !gEl || !bEl) {
+                    console.warn(`toggleSinewave: DOM elements not found for light ${lightId}`);
+                    return;
+                }
+                
+                rEl.value = initialR;
+                gEl.value = initialG;
+                bEl.value = initialB;
                 testRgb(lightId, true); // Send initial color immediately, suppress notifications
                 
                 // Update UI frequently for smooth visual feedback, but throttle network requests
                 animationIntervals[key] = setInterval(() => {
+                    // Check if elements still exist before updating
+                    const rEl = document.getElementById(`test-r-${lightId}`);
+                    const gEl = document.getElementById(`test-g-${lightId}`);
+                    const bEl = document.getElementById(`test-b-${lightId}`);
+                    
+                    if (!rEl || !gEl || !bEl) {
+                        // Elements removed, stop animation
+                        stopAnimation(lightId, 'sinewave');
+                        return;
+                    }
+                    
                     state.phase += speed;
                     if (state.phase >= Math.PI * 2) {
                         state.phase -= Math.PI * 2;
@@ -1118,9 +1222,9 @@
                     const b = Math.floor((Math.sin(state.phase + (4 * Math.PI / 3)) + 1) / 2 * 255);
                     
                     // Always update UI for smooth visual feedback
-                    document.getElementById(`test-r-${lightId}`).value = r;
-                    document.getElementById(`test-g-${lightId}`).value = g;
-                    document.getElementById(`test-b-${lightId}`).value = b;
+                    rEl.value = r;
+                    gEl.value = g;
+                    bEl.value = b;
                     
                     // Throttle network requests to reduce traffic
                     testRgbThrottled(lightId);

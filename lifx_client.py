@@ -654,18 +654,39 @@ class LifxLanClient:
                             return
                         
                         # Only request if we haven't set another color in the meantime and color set count is still low
-                        with self.lock:
-                            # Remove from pending requests
-                            if target in self.pending_state_requests and self.pending_state_requests[target] == cancel_event:
-                                del self.pending_state_requests[target]
-                            
-                            if target in self.lights:
-                                light = self.lights[target]
-                                time_since_set = time.time() - light.color_set_time
-                                # Only request if color hasn't been updated recently and set count is still low
-                                if time_since_set >= fade_time - 0.1 and light.color_set_count <= 2:
-                                    light.state_requested_time = time.time()
-                                    self._request_light_state(light)
+                        try:
+                            with self.lock:
+                                # Remove from pending requests
+                                if target in self.pending_state_requests and self.pending_state_requests[target] == cancel_event:
+                                    del self.pending_state_requests[target]
+                                
+                                if target in self.lights:
+                                    light = self.lights[target]
+                                    # Safely access attributes with defaults
+                                    color_set_time = getattr(light, 'color_set_time', 0)
+                                    color_set_count = getattr(light, 'color_set_count', 0)
+                                    time_since_set = time.time() - color_set_time
+                                    # Only request if color hasn't been updated recently and set count is still low
+                                    if time_since_set >= fade_time - 0.1 and color_set_count <= 2:
+                                        light.state_requested_time = time.time()
+                                        self._request_light_state(light)
+                        except Exception as e:
+                            # Log error but don't crash - this is a background thread
+                            import sys
+                            try:
+                                target_str = target.hex() if target else "unknown"
+                            except:
+                                target_str = str(target) if target else "unknown"
+                            print(f"Error in request_state_after_fade for target {target_str}: {e}", file=sys.stderr)
+                            import traceback
+                            traceback.print_exc(file=sys.stderr)
+                            # Clean up on error
+                            try:
+                                with self.lock:
+                                    if target and target in self.pending_state_requests and self.pending_state_requests[target] == cancel_event:
+                                        del self.pending_state_requests[target]
+                            except:
+                                pass
                     
                     # Request state in background thread
                     threading.Thread(target=request_state_after_fade, daemon=True).start()
