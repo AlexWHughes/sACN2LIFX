@@ -540,60 +540,82 @@ def update_mapping():
     """Update mapping for a light"""
     global light_mappings, dmx_receiver, dmx_thread, lifx_client
     
-    data = request.json
-    mapped_light_id = data.get('light_id')
+    try:
+        if not request.is_json:
+            return jsonify({'success': False, 'error': 'Request must be JSON'}), 400
+        
+        data = request.json
+        if not data:
+            return jsonify({'success': False, 'error': 'Request body is required'}), 400
+        
+        mapped_light_id = data.get('light_id')
+        
+        if not mapped_light_id:
+            return jsonify({'success': False, 'error': 'light_id required'}), 400
+        
+        # Get existing mapping to preserve label/model/ip if light isn't currently discovered
+        existing_mapping = light_mappings.get(mapped_light_id, {})
+        
+        # Try to get light info if available
+        light_label = existing_mapping.get('label')  # Preserve existing if available
+        light_model = existing_mapping.get('model')  # Preserve existing if available
+        light_ip = existing_mapping.get('ip')  # Preserve existing if available
+        
+        if lifx_client:
+            lights = lifx_client.get_lights()
+            for light in lights:
+                if light_id(light) == mapped_light_id:
+                    # Update with current discovered info
+                    light_label = light.label
+                    light_model = light.model_name
+                    light_ip = light.ip
+                    break
+        
+        # Get values from request
+        universe = data.get('universe')
+        start_channel = data.get('start_channel')
+        brightness = data.get('brightness')
+        channel_mode = data.get('channel_mode')
+        
+        # Validate required fields - check for None, empty string, or 0
+        if universe is None or universe == '' or universe == 0:
+            return jsonify({'success': False, 'error': 'universe is required and must be greater than 0'}), 400
+        if start_channel is None or start_channel == '' or start_channel == 0:
+            return jsonify({'success': False, 'error': 'start_channel is required and must be greater than 0'}), 400
+        
+        # Convert values with error handling
+        try:
+            universe_int = int(universe)
+            start_channel_int = int(start_channel)
+        except (ValueError, TypeError) as e:
+            return jsonify({'success': False, 'error': f'Invalid universe or start_channel: {str(e)}'}), 400
+        
+        try:
+            brightness_float = float(brightness) if brightness is not None else existing_mapping.get('brightness', MAX_BRIGHTNESS)
+        except (ValueError, TypeError):
+            brightness_float = existing_mapping.get('brightness', MAX_BRIGHTNESS)
+        
+        # Build mapping with explicit values from request
+        mapping = {
+            'universe': universe_int,
+            'start_channel': start_channel_int,
+            'brightness': brightness_float,
+            'channel_mode': str(channel_mode) if channel_mode else existing_mapping.get('channel_mode', 'RGB'),
+            'label': light_label,  # Store label for display when not discovered
+            'model': light_model,  # Store model for display when not discovered
+            'ip': light_ip  # Store IP for auto-discovery
+        }
+        
+        light_mappings[mapped_light_id] = mapping
+        save_config()
+        
+        # Restart DMX worker if running
+        _restart_dmx_if_running()
+        
+        return jsonify({'success': True, 'mapping': mapping})
     
-    if not mapped_light_id:
-        return jsonify({'success': False, 'error': 'light_id required'}), 400
-    
-    # Get existing mapping to preserve label/model/ip if light isn't currently discovered
-    existing_mapping = light_mappings.get(mapped_light_id, {})
-    
-    # Try to get light info if available
-    light_label = existing_mapping.get('label')  # Preserve existing if available
-    light_model = existing_mapping.get('model')  # Preserve existing if available
-    light_ip = existing_mapping.get('ip')  # Preserve existing if available
-    
-    if lifx_client:
-        lights = lifx_client.get_lights()
-        for light in lights:
-            if light_id(light) == mapped_light_id:
-                # Update with current discovered info
-                light_label = light.label
-                light_model = light.model_name
-                light_ip = light.ip
-                break
-    
-    # Get values from request
-    universe = data.get('universe')
-    start_channel = data.get('start_channel')
-    brightness = data.get('brightness')
-    channel_mode = data.get('channel_mode')
-    
-    # Validate required fields - check for None, empty string, or 0
-    if universe is None or universe == '' or universe == 0:
-        return jsonify({'success': False, 'error': 'universe is required and must be greater than 0'}), 400
-    if start_channel is None or start_channel == '' or start_channel == 0:
-        return jsonify({'success': False, 'error': 'start_channel is required and must be greater than 0'}), 400
-    
-    # Build mapping with explicit values from request
-    mapping = {
-        'universe': int(universe),
-        'start_channel': int(start_channel),
-        'brightness': float(brightness) if brightness is not None else existing_mapping.get('brightness', MAX_BRIGHTNESS),
-        'channel_mode': str(channel_mode) if channel_mode else existing_mapping.get('channel_mode', 'RGB'),
-        'label': light_label,  # Store label for display when not discovered
-        'model': light_model,  # Store model for display when not discovered
-        'ip': light_ip  # Store IP for auto-discovery
-    }
-    
-    light_mappings[mapped_light_id] = mapping
-    save_config()
-    
-    # Restart DMX worker if running
-    _restart_dmx_if_running()
-    
-    return jsonify({'success': True, 'mapping': mapping})
+    except Exception as e:
+        return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
 
 
 @app.route('/api/mappings/<light_id>', methods=['DELETE'])

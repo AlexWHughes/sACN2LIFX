@@ -570,6 +570,15 @@
                     body: JSON.stringify(requestBody)
                 });
                 
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    console.error('Non-JSON response:', text);
+                    showNotification('Server returned an error. Please check the console.', true);
+                    return;
+                }
+                
                 const data = await response.json();
                 
                 if (data.success) {
@@ -577,9 +586,10 @@
                     loadLights();
                     updateStatus();
                 } else {
-                    showNotification('Failed to update mapping: ' + data.error, true);
+                    showNotification('Failed to update mapping: ' + (data.error || 'Unknown error'), true);
                 }
             } catch (error) {
+                console.error('Error updating mapping:', error);
                 showNotification('Error: ' + error.message, true);
             }
         }
@@ -716,7 +726,7 @@
             }
             
             // Render configured lights
-            if (configuredLights.length === 0) {
+            if (allConfiguredLights.length === 0) {
                 configuredContainer.innerHTML = '<div class="empty-state">No lights configured yet. Discover lights and add mappings to get started.</div>';
             } else {
                 configuredContainer.innerHTML = allConfiguredLights.map(light => {

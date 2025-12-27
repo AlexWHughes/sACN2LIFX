@@ -1,3 +1,4 @@
+#version 0.9
 import socket
 import struct
 import time
@@ -528,6 +529,17 @@ class LifxLanClient:
 
         self._rate_limit()
         self.sock.sendto(packet, (ip, LIFX_PORT))
+        
+        # Update the light's current state so UI can display it
+        with self.lock:
+            if target in self.lights:
+                light = self.lights[target]
+                light.current_hue = hue
+                light.current_saturation = sat
+                light.current_brightness = bri
+                light.current_kelvin = kel
+                # Update RGB for display (convert from the original RGB values, not HSBK)
+                light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
 
     def set_power(self, target: bytes, ip: str, power: bool):
         """Set power state for a specific light"""

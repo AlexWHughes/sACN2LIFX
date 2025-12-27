@@ -1,3 +1,4 @@
+#version 0.9
 import sacn
 import threading
 import time
@@ -33,11 +34,18 @@ class DMXReceiver:
         
     def listen_to_universe(self, universe: int, callback: Callable):
         """Register a callback for a specific DMX universe"""
+        if not self.receiver:
+            raise RuntimeError("Receiver not initialized")
+        
         self.universe_callbacks[universe] = callback
+        print(f"Registering listener for universe {universe}")
         
         # Create a handler function for this universe
         def handle_dmx(packet):
-            if self.running:
+            try:
+                if not self.running:
+                    return  # Don't process if not running
+                
                 # Update statistics
                 with self.stats_lock:
                     self.stats['packets_received'] += 1
@@ -47,13 +55,43 @@ class DMXReceiver:
                         self.stats['packets_per_universe'][universe] = 0
                     self.stats['packets_per_universe'][universe] += 1
                 
-                callback(packet.dmxData, universe)
+                # Extract DMX data from packet
+                dmx_data = None
+                if hasattr(packet, 'dmxData'):
+                    dmx_data = packet.dmxData
+                elif hasattr(packet, 'dmx_data'):
+                    dmx_data = packet.dmx_data
+                elif hasattr(packet, 'dmx'):
+                    dmx_data = packet.dmx
+                elif isinstance(packet, (list, tuple)):
+                    dmx_data = list(packet)
+                elif hasattr(packet, '__iter__') and not isinstance(packet, (str, bytes)):
+                    dmx_data = list(packet)
+                else:
+                    print(f"Warning: Could not extract DMX data from packet for universe {universe}. Packet type: {type(packet)}, attributes: {dir(packet)[:10]}")
+                    return
+                
+                # Call the callback with DMX data
+                if dmx_data is not None:
+                    callback(dmx_data, universe)
+            except Exception as e:
+                print(f"Error in handle_dmx for universe {universe}: {e}")
+                import traceback
+                traceback.print_exc()
         
-        # Register the listener using the decorator pattern
-        self.receiver.listen_on('universe', universe=universe)(handle_dmx)
+        # Register the listener using register_listener method (more reliable than decorator pattern)
+        try:
+            self.receiver.register_listener('universe', handle_dmx, universe=universe)
+        except Exception as e:
+            print(f"Error registering listener for universe {universe}: {e}")
+            raise
         
         # Join multicast for this universe
-        self.receiver.join_multicast(universe)
+        try:
+            self.receiver.join_multicast(universe)
+        except Exception as e:
+            print(f"Error joining multicast for universe {universe}: {e}")
+            # Continue anyway as unicast might still work
     
     def get_stats(self) -> Dict:
         """Get current reception statistics"""
