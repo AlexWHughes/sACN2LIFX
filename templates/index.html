@@ -834,6 +834,14 @@
         async function deleteMapping(lightId) {
             try {
                 const response = await fetch(`/api/mappings/${lightId}`, { method: 'DELETE' });
+                
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    throw new Error(`Server returned non-JSON response (${response.status}): ${text.substring(0, 100)}`);
+                }
+                
                 const data = await response.json();
                 
                 if (data.success) {
@@ -841,7 +849,7 @@
                     loadLights();
                     updateStatus();
                 } else {
-                    showNotification('Failed to remove mapping', true);
+                    showNotification('Failed to remove mapping: ' + (data.error || 'Unknown error'), true);
                 }
             } catch (error) {
                 showNotification('Error: ' + error.message, true);

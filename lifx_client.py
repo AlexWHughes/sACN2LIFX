@@ -543,8 +543,13 @@ class LifxLanClient:
                 light.current_saturation = sat
                 light.current_brightness = bri
                 light.current_kelvin = kel
-                # Update RGB for display (convert from the original RGB values, not HSBK)
-                light.current_rgb = (int(r * 255), int(g * 255), int(b * 255))
+                # Convert HSBK back to RGB to get the actual displayed color (with brightness applied)
+                # This ensures the stored RGB matches what's actually displayed on the light
+                h = hue / 65535.0
+                s = sat / 65535.0
+                v = bri / 65535.0
+                r_displayed, g_displayed, b_displayed = colorsys.hsv_to_rgb(h, s, v)
+                light.current_rgb = (int(r_displayed * 255), int(g_displayed * 255), int(b_displayed * 255))
                 # Mark that we just set the color (prevent stale STATE_LIGHT responses from overwriting)
                 light.color_set_time = time.time()
 

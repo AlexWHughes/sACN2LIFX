@@ -329,6 +329,50 @@ def dmx_worker():
         time.sleep(0.1)
 
 
+def _restart_dmx_if_running():
+    """Restart DMX worker if it's currently running (to pick up mapping changes)"""
+    global running, dmx_receiver, dmx_thread
+    
+    if not running:
+        return  # Not running, nothing to restart
+    
+    if not dmx_receiver:
+        return  # No receiver, nothing to restart
+    
+    try:
+        # Stop the current worker
+        running = False
+        if dmx_receiver:
+            dmx_receiver.stop()
+            dmx_receiver.reset_stats()
+        
+        # Wait for thread to finish
+        if dmx_thread and dmx_thread.is_alive():
+            dmx_thread.join(timeout=1.0)
+        
+        # Restart with updated mappings
+        sacn_bind_ip = None if _normalize_interface_ip(sacn_interface) == '0.0.0.0' else sacn_interface
+        
+        # Close and recreate receiver
+        if dmx_receiver:
+            try:
+                dmx_receiver.close()
+            except:
+                pass
+            dmx_receiver = None
+        
+        # Create new receiver
+        dmx_receiver = DMXReceiver(bind_ip=sacn_bind_ip)
+        
+        # Start worker thread
+        running = True
+        dmx_thread = threading.Thread(target=dmx_worker, daemon=True)
+        dmx_thread.start()
+    except Exception as e:
+        print(f"Error restarting DMX worker: {e}")
+        running = False
+
+
 # =========================
 # WEB UI ROUTES
 # =========================
