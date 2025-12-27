@@ -3,7 +3,7 @@
 sACN2LIFX - Control LIFX lights via sACN/E1.31
 """
 
-VERSION = "1.0.0"
+VERSION = "281225 047"
 
 import json
 import os
@@ -239,14 +239,16 @@ def process_dmx_data(dmx_data: list, universe: int):
         
         start_channel = mapping.get('start_channel', 0) - 1  # Convert to 0-based
         brightness = mapping.get('brightness', MAX_BRIGHTNESS)
-        channel_mode = mapping.get('channel_mode', 'RGB')
+        channel_mode = mapping.get('channel_mode', 'RGB (8bit)')
         
         # Determine number of channels based on mode
         channels_needed = {
-            'RGB': 3,
-            'RGBW': 4,
-            'HSI': 3,
-            'HSBK': 4
+            'RGB (8bit)': 3,      # 8-bit RGB (3 channels)
+            'RGB (16bit)': 6,     # 16-bit RGB (6 channels: MSB+LSB per color)
+            'RGBW (8bit)': 4,     # 8-bit RGBW (4 channels)
+            'RGBW (16bit)': 8,    # 16-bit RGBW (8 channels: MSB+LSB per color)
+            'HSBK (8bit)': 4,     # 8-bit HSBK (4 channels)
+            'HSBK (16bit)': 8     # 16-bit HSBK (8 channels: MSB+LSB per parameter)
         }.get(channel_mode, 3)
         
         if start_channel < 0 or start_channel + channels_needed > len(dmx_data):
@@ -258,28 +260,70 @@ def process_dmx_data(dmx_data: list, universe: int):
         # Check if values have changed significantly (to avoid spamming updates)
         last_values = _last_sent_values.get(mapped_light_id)
         if last_values is not None:
-            # Check if any channel has changed by threshold
             has_significant_change = False
             max_change = 0
-            for i, val in enumerate(channel_values):
-                if i >= len(last_values):
-                    has_significant_change = True
-                    break
-                change = abs(val - last_values[i])
-                max_change = max(max_change, change)
-                if change >= VALUE_CHANGE_THRESHOLD:
-                    has_significant_change = True
-                    break
+            
+            # For 16-bit modes, check combined 16-bit values instead of individual channels
+            if channel_mode == 'RGB (16bit)' and len(channel_values) >= 6 and len(last_values) >= 6:
+                # Compare combined 16-bit RGB values
+                for color_idx in range(3):  # R, G, B
+                    msb_idx = color_idx * 2
+                    lsb_idx = color_idx * 2 + 1
+                    current_16bit = (channel_values[msb_idx] << 8) | channel_values[lsb_idx]
+                    last_16bit = (last_values[msb_idx] << 8) | last_values[lsb_idx]
+                    change = abs(current_16bit - last_16bit)
+                    max_change = max(max_change, change)
+                    # For 16-bit, use a threshold of 1 (any change in combined value triggers update)
+                    # This allows fine-grained control while still filtering out identical values
+                    if change >= 1:
+                        has_significant_change = True
+                        break
+            elif channel_mode == 'RGBW (16bit)' and len(channel_values) >= 8 and len(last_values) >= 8:
+                # Compare combined 16-bit RGBW values
+                for color_idx in range(4):  # R, G, B, W
+                    msb_idx = color_idx * 2
+                    lsb_idx = color_idx * 2 + 1
+                    current_16bit = (channel_values[msb_idx] << 8) | channel_values[lsb_idx]
+                    last_16bit = (last_values[msb_idx] << 8) | last_values[lsb_idx]
+                    change = abs(current_16bit - last_16bit)
+                    max_change = max(max_change, change)
+                    if change >= 1:
+                        has_significant_change = True
+                        break
+            elif channel_mode == 'HSBK (16bit)' and len(channel_values) >= 8 and len(last_values) >= 8:
+                # Compare combined 16-bit HSBK values
+                for param_idx in range(4):  # H, S, B, K
+                    msb_idx = param_idx * 2
+                    lsb_idx = param_idx * 2 + 1
+                    current_16bit = (channel_values[msb_idx] << 8) | channel_values[lsb_idx]
+                    last_16bit = (last_values[msb_idx] << 8) | last_values[lsb_idx]
+                    change = abs(current_16bit - last_16bit)
+                    max_change = max(max_change, change)
+                    if change >= 1:
+                        has_significant_change = True
+                        break
+            else:
+                # For 8-bit modes, check individual channel values
+                for i, val in enumerate(channel_values):
+                    if i >= len(last_values):
+                        has_significant_change = True
+                        break
+                    change = abs(val - last_values[i])
+                    max_change = max(max_change, change)
+                    if change >= VALUE_CHANGE_THRESHOLD:
+                        has_significant_change = True
+                        break
+            
             if not has_significant_change:
                 if dmx_logger and enable_dmx_log:
-                    dmx_logger.debug(f"  SKIP {light.label}: change={max_change:.1f} < threshold={VALUE_CHANGE_THRESHOLD}, values={channel_values}")
+                    dmx_logger.debug(f"  SKIP {light.label}: change={max_change:.1f} < threshold, values={channel_values}")
                 continue  # Skip update if change is too small
         
         # Store current values
         _last_sent_values[mapped_light_id] = list(channel_values)
         
         # Convert based on channel mode
-        if channel_mode == 'RGB':
+        if channel_mode == 'RGB (8bit)':
             r = channel_values[0] / MAX_RGB_PER_COLOUR
             g = channel_values[1] / MAX_RGB_PER_COLOUR
             b = channel_values[2] / MAX_RGB_PER_COLOUR
@@ -315,7 +359,49 @@ def process_dmx_data(dmx_data: list, universe: int):
                 if send_duration > PERF_SEND_THRESHOLD_MS:
                     dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
         
-        elif channel_mode == 'RGBW':
+        elif channel_mode == 'RGB (16bit)':
+            # RGB16: 16-bit per channel (6 channels total: MSB+LSB for each color)
+            # Channels: R_MSB, R_LSB, G_MSB, G_LSB, B_MSB, B_LSB
+            r_16bit = (channel_values[0] << 8) | channel_values[1]  # 0-65535
+            g_16bit = (channel_values[2] << 8) | channel_values[3]  # 0-65535
+            b_16bit = (channel_values[4] << 8) | channel_values[5]  # 0-65535
+            
+            # Normalize 16-bit values (0-65535) to 0-1 range
+            r = r_16bit / 65535.0
+            g = g_16bit / 65535.0
+            b = b_16bit / 65535.0
+            
+            # Clamp RGB values to 0-1
+            r = max(0.0, min(1.0, r))
+            g = max(0.0, min(1.0, g))
+            b = max(0.0, min(1.0, b))
+            
+            # Apply brightness multiplier from mapping
+            bright_adj = brightness
+            
+            if dmx_logger and enable_dmx_log:
+                rgb_int = (int(r * 255), int(g * 255), int(b * 255))
+                dmx_logger.info(f"  → {light.label}: RGB16=({r_16bit},{g_16bit},{b_16bit}) → RGB=({rgb_int[0]},{rgb_int[1]},{rgb_int[2]}), brightness={bright_adj:.2f}, fade={FADE_DURATION_MS}ms")
+            
+            send_start = None
+            if enable_perf_logging:
+                send_start = time.time()
+            
+            lifx_client.set_rgb(
+                light.target,
+                light.ip,
+                r, g, b,
+                kelvin=DEFAULT_KELVIN,
+                duration_ms=FADE_DURATION_MS,
+                brightness=bright_adj
+            )
+            
+            if enable_perf_logging and send_start is not None:
+                send_duration = (time.time() - send_start) * 1000
+                if send_duration > PERF_SEND_THRESHOLD_MS:
+                    dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
+        
+        elif channel_mode == 'RGBW (8bit)':
             r = channel_values[0] / MAX_RGB_PER_COLOUR
             g = channel_values[1] / MAX_RGB_PER_COLOUR
             b = channel_values[2] / MAX_RGB_PER_COLOUR
@@ -354,20 +440,34 @@ def process_dmx_data(dmx_data: list, universe: int):
                 if send_duration > PERF_SEND_THRESHOLD_MS:
                     dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
         
-        elif channel_mode == 'HSI':
-            # HSI: Hue (0-360), Saturation (0-100), Intensity (0-100)
-            hue = (channel_values[0] / 255.0) * MAX_HUE
-            saturation = (channel_values[1] / 255.0) * MAX_SATURATION
-            intensity = (channel_values[2] / 255.0) * MAX_INTENSITY
+        elif channel_mode == 'RGBW (16bit)':
+            # RGBW16: 16-bit per channel (8 channels total: MSB+LSB for each color)
+            # Channels: R_MSB, R_LSB, G_MSB, G_LSB, B_MSB, B_LSB, W_MSB, W_LSB
+            r_16bit = (channel_values[0] << 8) | channel_values[1]  # 0-65535
+            g_16bit = (channel_values[2] << 8) | channel_values[3]  # 0-65535
+            b_16bit = (channel_values[4] << 8) | channel_values[5]  # 0-65535
+            w_16bit = (channel_values[6] << 8) | channel_values[7]  # 0-65535
             
-            # Convert HSI to RGB
-            h = hue / MAX_HUE
-            s = saturation / MAX_SATURATION
-            i = intensity / MAX_INTENSITY
+            # Normalize 16-bit values (0-65535) to 0-1 range
+            r = r_16bit / 65535.0
+            g = g_16bit / 65535.0
+            b = b_16bit / 65535.0
+            w = w_16bit / 65535.0
             
-            r, g, b = colorsys.hsv_to_rgb(h, s, i)
+            # Clamp values to 0-1
+            r = max(0.0, min(1.0, r))
+            g = max(0.0, min(1.0, g))
+            b = max(0.0, min(1.0, b))
+            w = max(0.0, min(1.0, w))
             
-            bright_adj = brightness * i  # Use intensity as brightness multiplier
+            # For RGBW, blend white with RGB
+            # Simple approach: mix white into RGB based on white channel
+            r = min(1.0, r + w * 0.3)
+            g = min(1.0, g + w * 0.3)
+            b = min(1.0, b + w * 0.3)
+            
+            # Apply brightness multiplier from mapping
+            bright_adj = brightness
             
             send_start = None
             if enable_perf_logging:
@@ -387,12 +487,53 @@ def process_dmx_data(dmx_data: list, universe: int):
                 if send_duration > PERF_SEND_THRESHOLD_MS:
                     dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
         
-        elif channel_mode == 'HSBK':
-            # HSBK: Hue (0-360), Saturation (0-100), Brightness (0-100), Kelvin (2500-9000)
+        elif channel_mode == 'HSBK (8bit)':
+            # HSBK8: 8-bit HSBK - Hue (0-360), Saturation (0-100), Brightness (0-100), Kelvin (2500-9000)
             hue = (channel_values[0] / 255.0) * MAX_HUE
             saturation = (channel_values[1] / 255.0) * MAX_SATURATION
             brightness_val = (channel_values[2] / 255.0) * MAX_BRIGHTNESS
             kelvin = int(2500 + (channel_values[3] / 255.0) * (9000 - 2500))
+            
+            # Convert HS to RGB
+            h = hue / MAX_HUE
+            s = saturation / MAX_SATURATION
+            v = brightness_val / MAX_BRIGHTNESS
+            
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            
+            bright_adj = brightness * v
+            
+            send_start = None
+            if enable_perf_logging:
+                send_start = time.time()
+            
+            lifx_client.set_rgb(
+                light.target,
+                light.ip,
+                r, g, b,
+                kelvin=kelvin,
+                duration_ms=FADE_DURATION_MS,
+                brightness=bright_adj
+            )
+            
+            if enable_perf_logging and send_start is not None:
+                send_duration = (time.time() - send_start) * 1000
+                if send_duration > PERF_SEND_THRESHOLD_MS:
+                    dmx_logger.warning(f"    SLOW send: {send_duration:.1f}ms")
+        
+        elif channel_mode == 'HSBK (16bit)':
+            # HSBK16: 16-bit HSBK - 8 channels: MSB+LSB for each parameter
+            # Channels: H_MSB, H_LSB, S_MSB, S_LSB, B_MSB, B_LSB, K_MSB, K_LSB
+            hue_16bit = (channel_values[0] << 8) | channel_values[1]  # 0-65535 → 0-360°
+            saturation_16bit = (channel_values[2] << 8) | channel_values[3]  # 0-65535 → 0-100%
+            brightness_16bit = (channel_values[4] << 8) | channel_values[5]  # 0-65535 → 0-100%
+            kelvin_16bit = (channel_values[6] << 8) | channel_values[7]  # 0-65535 → 2500-9000K
+            
+            # Convert 16-bit values to their full ranges
+            hue = (hue_16bit / 65535.0) * MAX_HUE  # 0-360°
+            saturation = (saturation_16bit / 65535.0) * MAX_SATURATION  # 0-100%
+            brightness_val = (brightness_16bit / 65535.0) * MAX_BRIGHTNESS  # 0-100%
+            kelvin = int(2500 + (kelvin_16bit / 65535.0) * (9000 - 2500))  # 2500-9000K
             
             # Convert HS to RGB
             h = hue / MAX_HUE
@@ -644,7 +785,7 @@ def discover_lights():
                 'target': light.target.hex(),
                 'model': light.model_name,
                 'product_id': light.product,
-                'supported_modes': getattr(light, 'supported_modes', ['RGB'])
+                'supported_modes': getattr(light, 'supported_modes', ['RGB (8bit)', 'RGB (16bit)', 'RGBW (8bit)', 'RGBW (16bit)', 'HSBK (8bit)', 'HSBK (16bit)'])
             }
             for light in lights
         ]
@@ -671,7 +812,7 @@ def get_lights():
             'target': light.target.hex(),
             'model': light.model_name,
             'product_id': light.product,
-            'supported_modes': getattr(light, 'supported_modes', ['RGB']),
+            'supported_modes': getattr(light, 'supported_modes', ['RGB (8bit)', 'RGB (16bit)', 'RGBW (8bit)', 'RGBW (16bit)', 'HSBK (8bit)', 'HSBK (16bit)']),
             'mapping': light_mappings.get(lid, {}),
             'discovered': discovered
         }
@@ -710,7 +851,7 @@ def get_lights():
             
             fake_light.model_name = stored_model
             fake_light.product = 0
-            fake_light.supported_modes = ['RGB', 'RGBW', 'HSI', 'HSBK']
+            fake_light.supported_modes = ['RGB (8bit)', 'RGB (16bit)', 'RGBW (8bit)', 'RGBW (16bit)', 'HSBK (8bit)', 'HSBK (16bit)']
             
             all_lights[mapped_light_id] = _build_light_data(fake_light, discovered=False)
     
@@ -848,7 +989,7 @@ def update_mapping():
             'universe': universe_int,
             'start_channel': start_channel_int,
             'brightness': brightness_float,
-            'channel_mode': str(channel_mode) if channel_mode else existing_mapping.get('channel_mode', 'RGB'),
+            'channel_mode': str(channel_mode) if channel_mode else existing_mapping.get('channel_mode', 'RGB (8bit)'),
             'label': light_label,  # Store label for display when not discovered
             'model': light_model,  # Store model for display when not discovered
             'ip': light_ip  # Store IP for auto-discovery
@@ -925,7 +1066,7 @@ def add_manual_light():
         lid = light.target.hex()
         light_label = light.label or label or f"Light {ip}"
         light_model = light.model_name or 'Unknown Model'
-        supported_modes = getattr(light, 'supported_modes', ['RGB', 'RGBW', 'HSI', 'HSBK'])
+        supported_modes = getattr(light, 'supported_modes', ['RGB (8bit)', 'RGB (16bit)', 'RGBW (8bit)', 'RGBW (16bit)', 'HSBK (8bit)', 'HSBK (16bit)'])
     else:
         # Create a placeholder ID based on IP (will be updated when discovered)
         # Use a hash of the IP to create a consistent ID
@@ -934,7 +1075,7 @@ def add_manual_light():
         lid = f"manual_{ip_hash}"
         light_label = label or f"Light {ip}"
         light_model = 'Not discovered'
-        supported_modes = ['RGB', 'RGBW', 'HSI', 'HSBK']
+        supported_modes = ['RGB (8bit)', 'RGB (16bit)', 'RGBW (8bit)', 'RGBW (16bit)', 'HSBK (8bit)', 'HSBK (16bit)']
     
     # Check if mapping already exists for this light_id
     if lid in light_mappings:
@@ -946,7 +1087,7 @@ def add_manual_light():
         'label': light_label,
         'model': light_model,
         'brightness': MAX_BRIGHTNESS,
-        'channel_mode': 'RGB',
+        'channel_mode': 'RGB (8bit)',
         'universe': None,  # User needs to configure this
         'start_channel': None  # User needs to configure this
     }

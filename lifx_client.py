@@ -515,9 +515,10 @@ class LifxLanClient:
     
     def _get_supported_modes(self, product: int) -> List[str]:
         """Determine supported channel modes based on product ID"""
-        # All LIFX lights support RGB, RGBW, HSI, and HSBK
+        # All LIFX lights support RGB (8bit), RGB (16bit), RGBW (8bit), RGBW (16bit), HSBK (8bit), and HSBK (16bit)
         # RGBW can be used on any light - the white channel will be blended into RGB
-        modes = ["RGB", "RGBW", "HSI", "HSBK"]
+        # 16-bit modes provide higher precision for professional lighting control
+        modes = ["RGB (8bit)", "RGB (16bit)", "RGBW (8bit)", "RGBW (16bit)", "HSBK (8bit)", "HSBK (16bit)"]
         
         return modes
 
@@ -542,6 +543,17 @@ class LifxLanClient:
         g = clamp01(g)
         b = clamp01(b)
         
+        # Check if light is powered on, and turn it on if needed
+        # This ensures color commands are visible even if the light was turned off
+        with self.lock:
+            if target in self.lights:
+                light = self.lights[target]
+                # Power value: 0 = off, 65535 = on
+                if light.power == 0:
+                    # Light is off, turn it on first
+                    self.set_power(target, ip, True)
+                    light.power = 65535  # Update local state immediately
+        
         # Convert RGB to HSBK
         hue, sat, bri, kel = rgb01_to_hsbk(r, g, b, kelvin)
         
@@ -563,6 +575,22 @@ class LifxLanClient:
         )
 
         packet = self._finalise(header + payload)
+
+        # Check if light is powered on, and turn it on if needed
+        # This ensures color commands are visible even if the light was turned off
+        needs_power_on = False
+        with self.lock:
+            if target in self.lights:
+                light = self.lights[target]
+                # Power value: 0 = off, 65535 = on
+                if light.power == 0:
+                    # Light is off, turn it on first
+                    needs_power_on = True
+                    light.power = 65535  # Update local state immediately
+        
+        # Turn on light if needed (outside lock to avoid blocking)
+        if needs_power_on:
+            self.set_power(target, ip, True)
 
         self._rate_limit()
         self.sock.sendto(packet, (ip, LIFX_PORT))
