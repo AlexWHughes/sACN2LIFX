@@ -39,9 +39,15 @@ else:
     dmx_logger = None  # Disabled by default
 
 # Performance logging configuration
-PERF_LOG_SAMPLE_RATE = int(os.getenv('PERF_LOG_SAMPLE_RATE', '100'))  # Log every N frames
-PERF_SEND_THRESHOLD_MS = float(os.getenv('PERF_SEND_THRESHOLD_MS', '5.0'))  # Log slow sends
-PERF_PROCESS_THRESHOLD_MS = float(os.getenv('PERF_PROCESS_THRESHOLD_MS', '10.0'))  # Log slow processing
+try:
+    PERF_LOG_SAMPLE_RATE = max(1, int(os.getenv('PERF_LOG_SAMPLE_RATE', '100')))  # Log every N frames, minimum 1
+    PERF_SEND_THRESHOLD_MS = max(0.0, float(os.getenv('PERF_SEND_THRESHOLD_MS', '5.0')))  # Log slow sends
+    PERF_PROCESS_THRESHOLD_MS = max(0.0, float(os.getenv('PERF_PROCESS_THRESHOLD_MS', '10.0')))  # Log slow processing
+except ValueError as e:
+    print(f"Warning: Invalid performance logging configuration: {e}. Using defaults.")
+    PERF_LOG_SAMPLE_RATE = 100
+    PERF_SEND_THRESHOLD_MS = 5.0
+    PERF_PROCESS_THRESHOLD_MS = 10.0
 
 # Frame counter for sampling (thread-local would be better, but simple counter works for single-threaded DMX processing)
 _dmx_frame_counter = 0
