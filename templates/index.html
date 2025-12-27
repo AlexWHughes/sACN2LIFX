@@ -928,7 +928,7 @@
         }
         
         // Throttled version of testRgb - only sends network request if enough time has passed
-        async function testRgbThrottled(lightId, force = false) {
+        async function testRgbThrottled(lightId, force = false, suppressNotifications = true) {
             const now = Date.now();
             const lastCall = testRgbThrottle[lightId] || 0;
             const interval = getAnimationUpdateInterval();
@@ -936,13 +936,13 @@
             // If forced or enough time has passed, make the network request
             if (force || (now - lastCall) >= interval) {
                 testRgbThrottle[lightId] = now;
-                return await testRgb(lightId);
+                return await testRgb(lightId, suppressNotifications);
             }
             // Otherwise, just update the UI values without network request
             return Promise.resolve();
         }
         
-        async function testRgb(lightId) {
+        async function testRgb(lightId, suppressNotifications = false) {
             const r = parseInt(document.getElementById(`test-r-${lightId}`).value) || 0;
             const g = parseInt(document.getElementById(`test-g-${lightId}`).value) || 0;
             const b = parseInt(document.getElementById(`test-b-${lightId}`).value) || 0;
@@ -965,11 +965,16 @@
                 const data = await validateJsonResponse(response);
                 
                 if (data.success) {
-                    showNotification(`Sent RGB(${r},${g},${b}) to ${data.light_label}`);
+                    // Only show notification if not suppressed (i.e., manual testing)
+                    if (!suppressNotifications) {
+                        showNotification(`Sent RGB(${r},${g},${b}) to ${data.light_label}`);
+                    }
                 } else {
+                    // Always show errors, even during animations
                     showNotification('Failed to send RGB: ' + data.error, true);
                 }
             } catch (error) {
+                // Always show errors, even during animations
                 showNotification('Error: ' + error.message, true);
             }
         }
@@ -1043,7 +1048,7 @@
                 document.getElementById(`test-r-${lightId}`).value = initialColor.r;
                 document.getElementById(`test-g-${lightId}`).value = initialColor.g;
                 document.getElementById(`test-b-${lightId}`).value = initialColor.b;
-                testRgb(lightId); // Send initial color immediately
+                testRgb(lightId, true); // Send initial color immediately, suppress notifications
                 
                 const updateInterval = getAnimationUpdateInterval();
                 animationIntervals[key] = setInterval(() => {
@@ -1095,7 +1100,7 @@
                 document.getElementById(`test-r-${lightId}`).value = initialR;
                 document.getElementById(`test-g-${lightId}`).value = initialG;
                 document.getElementById(`test-b-${lightId}`).value = initialB;
-                testRgb(lightId); // Send initial color immediately
+                testRgb(lightId, true); // Send initial color immediately, suppress notifications
                 
                 // Update UI frequently for smooth visual feedback, but throttle network requests
                 animationIntervals[key] = setInterval(() => {

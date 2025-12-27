@@ -108,6 +108,10 @@ class LifxLanClient:
         self.sock.bind((bind_ip, 0))
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
+        # Track pending state request threads per light to prevent accumulation
+        # Maps target (bytes) -> threading.Event (cancellation flag)
+        self.pending_state_requests: Dict[bytes, threading.Event] = {}
+
         # Start listener thread
         self.listening = True
         self.listener_thread = None
@@ -545,14 +549,19 @@ class LifxLanClient:
         
         # Check if light is powered on, and turn it on if needed
         # This ensures color commands are visible even if the light was turned off
+        needs_power_on = False
         with self.lock:
             if target in self.lights:
                 light = self.lights[target]
                 # Power value: 0 = off, 65535 = on
                 if light.power == 0:
                     # Light is off, turn it on first
-                    self.set_power(target, ip, True)
+                    needs_power_on = True
                     light.power = 65535  # Update local state immediately
+        
+        # Turn on light if needed (outside lock to avoid blocking)
+        if needs_power_on:
+            self.set_power(target, ip, True)
         
         # Convert RGB to HSBK
         hue, sat, bri, kel = rgb01_to_hsbk(r, g, b, kelvin)
@@ -575,22 +584,6 @@ class LifxLanClient:
         )
 
         packet = self._finalise(header + payload)
-
-        # Check if light is powered on, and turn it on if needed
-        # This ensures color commands are visible even if the light was turned off
-        needs_power_on = False
-        with self.lock:
-            if target in self.lights:
-                light = self.lights[target]
-                # Power value: 0 = off, 65535 = on
-                if light.power == 0:
-                    # Light is off, turn it on first
-                    needs_power_on = True
-                    light.power = 65535  # Update local state immediately
-        
-        # Turn on light if needed (outside lock to avoid blocking)
-        if needs_power_on:
-            self.set_power(target, ip, True)
 
         self._rate_limit()
         self.sock.sendto(packet, (ip, LIFX_PORT))
@@ -624,15 +617,50 @@ class LifxLanClient:
                 # Only request state if colors aren't being set frequently (likely DMX is not actively running)
                 # If colors are being set more than 2 times in COLOR_SET_RESET_INTERVAL, skip state request to avoid stale responses
                 if light.color_set_count <= 2:
+                    # Cancel any pending state request for this light to prevent thread accumulation
+                    with self.lock:
+                        if target in self.pending_state_requests:
+                            # Signal cancellation to the existing thread
+                            self.pending_state_requests[target].set()
+                        # Create a new cancellation event for this request
+                        cancel_event = threading.Event()
+                        self.pending_state_requests[target] = cancel_event
+                    
                     # Request actual state from light after fade completes to get real values
                     # This ensures we have the actual displayed color, accounting for any device-side adjustments
                     def request_state_after_fade():
                         # Wait for fade to complete plus a small buffer
                         fade_time = max(duration_ms / 1000.0, 0.1) + 0.2
-                        time.sleep(fade_time)
+                        
+                        # Sleep in small increments to allow cancellation
+                        sleep_interval = 0.05  # Check for cancellation every 50ms
+                        elapsed = 0.0
+                        while elapsed < fade_time:
+                            if cancel_event.is_set():
+                                # Request was cancelled, clean up and exit
+                                with self.lock:
+                                    if target in self.pending_state_requests and self.pending_state_requests[target] == cancel_event:
+                                        del self.pending_state_requests[target]
+                                return
+                            sleep_duration = min(sleep_interval, fade_time - elapsed)
+                            time.sleep(sleep_duration)
+                            elapsed += sleep_duration
+                        
+                        # Check for cancellation one more time before requesting
+                        if cancel_event.is_set():
+                            with self.lock:
+                                if target in self.pending_state_requests and self.pending_state_requests[target] == cancel_event:
+                                    del self.pending_state_requests[target]
+                            return
+                        
                         # Only request if we haven't set another color in the meantime and color set count is still low
                         with self.lock:
+                            # Remove from pending requests
+                            if target in self.pending_state_requests and self.pending_state_requests[target] == cancel_event:
+                                del self.pending_state_requests[target]
+                            
                             if target in self.lights:
+                                light = self.lights[target]
                                 time_since_set = time.time() - light.color_set_time
                                 # Only request if color hasn't been updated recently and set count is still low
                                 if time_since_set >= fade_time - 0.1 and light.color_set_count <= 2:
@@ -655,6 +683,13 @@ class LifxLanClient:
     def close(self):
         """Close the client and cleanup"""
         self.listening = False
+        
+        # Cancel all pending state requests
+        with self.lock:
+            for cancel_event in self.pending_state_requests.values():
+                cancel_event.set()
+            self.pending_state_requests.clear()
+        
         if self.sock:
             self.sock.close()
 
