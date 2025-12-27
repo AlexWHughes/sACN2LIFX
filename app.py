@@ -6,6 +6,7 @@ sACN2LIFX - Control LIFX lights via sACN/E1.31
 VERSION = "1.0.0"
 
 import json
+import os
 import threading
 import time
 import colorsys
@@ -16,15 +17,17 @@ from flask import Flask, render_template, jsonify, request
 from lifx_client import LifxLanClient, LifxLight
 from dmx_receiver import DMXReceiver
 
-# Set up logging for DMX to LIFX traffic (DISABLED for now)
-# logging.basicConfig(
-#     level=logging.INFO,
-#     format='%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
-#     datefmt='%H:%M:%S'
-# )
-# dmx_logger = logging.getLogger('dmx_lifx')
-# dmx_logger.setLevel(logging.INFO)
-dmx_logger = None  # Disabled for now
+# Set up logging for DMX to LIFX traffic (controlled via ENABLE_DMX_LOG env var)
+if os.getenv('ENABLE_DMX_LOG', 'false').lower() in ('true', '1', 'yes'):
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    dmx_logger = logging.getLogger('dmx_lifx')
+    dmx_logger.setLevel(logging.INFO)
+else:
+    dmx_logger = None  # Disabled by default
 
 try:
     import netifaces

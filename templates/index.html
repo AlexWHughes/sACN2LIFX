@@ -301,6 +301,21 @@
                     <p style="margin-bottom: 15px; color: #666; font-size: 0.9em;">
                         Test RGB values directly on configured lights without DMX. Useful for debugging refresh issues.
                     </p>
+                    <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 10px; margin-bottom: 15px; font-size: 0.9em;">
+                        <strong>⚠️ Important:</strong> Stop all animations before starting DMX processing to avoid conflicts and reduce network traffic.
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px; align-items: end;">
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label>Animation Update Interval (ms)</label>
+                            <input type="number" id="animationUpdateInterval" value="200" min="50" max="1000" step="50" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 100%;">
+                            <small style="color: #666; font-size: 0.85em; display: block; margin-top: 4px;">
+                                Network request rate for animations (default: 200ms = 5Hz). Lower values = smoother but more network traffic.
+                            </small>
+                        </div>
+                        <div>
+                            <button class="btn btn-danger" onclick="stopAllAnimations()" style="padding: 8px 16px;">Stop All Animations</button>
+                        </div>
+                    </div>
                     <div id="testRgbContainer" style="display: grid; gap: 15px;">
                         <!-- Test RGB controls will be rendered here -->
                     </div>
@@ -360,6 +375,16 @@
             }, 3000);
         }
         
+        async function validateJsonResponse(response) {
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
+                throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
+            }
+            return response.json();
+        }
+        
         async function addManualLight() {
             const ipInput = document.getElementById('manualLightIP');
             const labelInput = document.getElementById('manualLightLabel');
@@ -385,15 +410,7 @@
                     body: JSON.stringify({ ip, label })
                 });
                 
-                // Check if response is JSON
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
-                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
-                }
-                
-                const data = await response.json();
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     showNotification(`Light added${data.light.discovered ? ' and discovered' : ' (not discovered - will be configured when found)'}`);
@@ -420,15 +437,7 @@
             try {
                 const response = await fetch('/api/lights/discover', { method: 'POST' });
                 
-                // Check if response is JSON
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
-                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
-                }
-                
-                const data = await response.json();
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     lights = data.lights;
@@ -601,16 +610,7 @@
                     body: JSON.stringify(requestBody)
                 });
                 
-                // Check if response is JSON
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    console.error('Non-JSON response:', text);
-                    showNotification('Server returned an error. Please check the console.', true);
-                    return;
-                }
-                
-                const data = await response.json();
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     showNotification('Mapping updated successfully');
@@ -767,15 +767,7 @@
                     })
                 });
                 
-                // Check if response is JSON
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
-                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
-                }
-                
-                const data = await response.json();
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     showNotification('Mapping saved successfully');
@@ -793,16 +785,7 @@
             try {
                 const response = await fetch(`/api/mappings/${lightId}`, { method: 'DELETE' });
                 
-                // Check if response is JSON
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    // Sanitize and truncate error text to prevent exposing sensitive information
-                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
-                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
-                }
-                
-                const data = await response.json();
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     showNotification('Mapping removed');
@@ -818,12 +801,15 @@
         
         async function startDMX() {
             try {
+                // Stop all animations before starting DMX to avoid conflicts
+                stopAllAnimations();
+                
                 const response = await fetch('/api/control/start', { method: 'POST' });
                 const data = await response.json();
                 
                 if (data.success) {
                     running = true;
-                    showNotification('DMX processing started');
+                    showNotification('DMX processing started (all animations stopped)');
                     updateStatus();
                 } else {
                     showNotification('Failed to start: ' + data.error, true);
@@ -906,6 +892,39 @@
         const animationIntervals = {};
         const animationStates = {};
         
+        // Animation update interval (default: 200ms = 5Hz to reduce network traffic)
+        let animationUpdateInterval = 200;
+        
+        // Throttle map for testRgb calls - tracks last network request time per light
+        const testRgbThrottle = {};
+        
+        // Get animation update interval from UI or use default
+        function getAnimationUpdateInterval() {
+            const input = document.getElementById('animationUpdateInterval');
+            if (input) {
+                const value = parseInt(input.value);
+                if (value >= 50 && value <= 1000) {
+                    animationUpdateInterval = value;
+                }
+            }
+            return animationUpdateInterval;
+        }
+        
+        // Throttled version of testRgb - only sends network request if enough time has passed
+        async function testRgbThrottled(lightId, force = false) {
+            const now = Date.now();
+            const lastCall = testRgbThrottle[lightId] || 0;
+            const interval = getAnimationUpdateInterval();
+            
+            // If forced or enough time has passed, make the network request
+            if (force || (now - lastCall) >= interval) {
+                testRgbThrottle[lightId] = now;
+                return await testRgb(lightId);
+            }
+            // Otherwise, just update the UI values without network request
+            return Promise.resolve();
+        }
+        
         async function testRgb(lightId) {
             const r = parseInt(document.getElementById(`test-r-${lightId}`).value) || 0;
             const g = parseInt(document.getElementById(`test-g-${lightId}`).value) || 0;
@@ -926,14 +945,7 @@
                     })
                 });
                 
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
-                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
-                }
-                
-                const data = await response.json();
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     showNotification(`Sent RGB(${r},${g},${b}) to ${data.light_label}`);
@@ -952,6 +964,35 @@
                 delete animationIntervals[key];
                 delete animationStates[key];
             }
+            // Clear throttle for this light
+            delete testRgbThrottle[lightId];
+        }
+        
+        function stopAllAnimations() {
+            // Stop all running animations
+            for (const key in animationIntervals) {
+                clearInterval(animationIntervals[key]);
+                delete animationIntervals[key];
+            }
+            for (const key in animationStates) {
+                delete animationStates[key];
+            }
+            for (const key in testRgbThrottle) {
+                delete testRgbThrottle[key];
+            }
+            
+            // Reset all animation button states
+            document.querySelectorAll('[id$="-chase"], [id$="-sinewave"]').forEach(btn => {
+                if (btn.id.includes('-chase')) {
+                    btn.textContent = 'RGB Chase';
+                    btn.style.background = '#ff9800';
+                } else if (btn.id.includes('-sinewave')) {
+                    btn.textContent = 'Sinewave';
+                    btn.style.background = '#9c27b0';
+                }
+            });
+            
+            showNotification('All animations stopped');
         }
         
         function toggleRgbChase(lightId) {
@@ -985,16 +1026,17 @@
                 document.getElementById(`test-r-${lightId}`).value = initialColor.r;
                 document.getElementById(`test-g-${lightId}`).value = initialColor.g;
                 document.getElementById(`test-b-${lightId}`).value = initialColor.b;
-                testRgb(lightId);
+                testRgb(lightId); // Send initial color immediately
                 
+                const updateInterval = getAnimationUpdateInterval();
                 animationIntervals[key] = setInterval(() => {
                     colorIndex = (colorIndex + 1) % colors.length;
                     const color = colors[colorIndex];
                     document.getElementById(`test-r-${lightId}`).value = color.r;
                     document.getElementById(`test-g-${lightId}`).value = color.g;
                     document.getElementById(`test-b-${lightId}`).value = color.b;
-                    testRgb(lightId);
-                }, 500); // 0.5 seconds between each
+                    testRgbThrottled(lightId); // Use throttled version
+                }, updateInterval);
                 
                 btn.textContent = 'Stop Chase';
                 btn.style.background = '#f44336';
@@ -1025,9 +1067,20 @@
                 }
                 
                 const state = animationStates[key];
-                const updateInterval = 50; // Update every 50ms for smooth animation
+                const visualUpdateInterval = 50; // Update UI every 50ms for smooth visual feedback
+                const networkUpdateInterval = getAnimationUpdateInterval(); // Network requests at configured rate
                 const speed = 0.02; // Speed of sinewave (adjust for faster/slower)
                 
+                // Send initial color immediately
+                const initialR = Math.floor((Math.sin(state.phase) + 1) / 2 * 255);
+                const initialG = Math.floor((Math.sin(state.phase + (2 * Math.PI / 3)) + 1) / 2 * 255);
+                const initialB = Math.floor((Math.sin(state.phase + (4 * Math.PI / 3)) + 1) / 2 * 255);
+                document.getElementById(`test-r-${lightId}`).value = initialR;
+                document.getElementById(`test-g-${lightId}`).value = initialG;
+                document.getElementById(`test-b-${lightId}`).value = initialB;
+                testRgb(lightId); // Send initial color immediately
+                
+                // Update UI frequently for smooth visual feedback, but throttle network requests
                 animationIntervals[key] = setInterval(() => {
                     state.phase += speed;
                     if (state.phase >= Math.PI * 2) {
@@ -1042,11 +1095,14 @@
                     const g = Math.floor((Math.sin(state.phase + (2 * Math.PI / 3)) + 1) / 2 * 255);
                     const b = Math.floor((Math.sin(state.phase + (4 * Math.PI / 3)) + 1) / 2 * 255);
                     
+                    // Always update UI for smooth visual feedback
                     document.getElementById(`test-r-${lightId}`).value = r;
                     document.getElementById(`test-g-${lightId}`).value = g;
                     document.getElementById(`test-b-${lightId}`).value = b;
-                    testRgb(lightId);
-                }, updateInterval);
+                    
+                    // Throttle network requests to reduce traffic
+                    testRgbThrottled(lightId);
+                }, visualUpdateInterval);
                 
                 btn.textContent = 'Stop Sinewave';
                 btn.style.background = '#f44336';
@@ -1056,14 +1112,7 @@
         async function reloadConfig() {
             try {
                 const response = await fetch('/api/config/reload', { method: 'POST' });
-                const contentType = response.headers.get('content-type');
-                if (!contentType || !contentType.includes('application/json')) {
-                    const text = await response.text();
-                    const sanitizedText = text.replace(/[<>]/g, '').substring(0, 100).trim();
-                    throw new Error(`Server returned non-JSON response (${response.status})${sanitizedText ? ': ' + sanitizedText : ''}`);
-                }
-                
-                const data = await response.json();
+                const data = await validateJsonResponse(response);
                 
                 if (data.success) {
                     showNotification(`Configuration reloaded (${data.mappings_count} mappings)`);

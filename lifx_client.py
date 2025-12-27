@@ -17,6 +17,8 @@ MIN_SEND_INTERVAL = 0.02  # seconds (rate limit) - allows up to 50Hz updates for
 DEFAULT_KELVIN = 3500
 COLOR_SET_PROTECTION_TIME = 1.0  # seconds - prevent stale STATE_LIGHT responses from overwriting recently set colors
 COLOR_SET_PROTECTION_TIME_DMX = 5.0  # seconds - longer protection when DMX is actively running
+COLOR_SET_DMX_THRESHOLD_SECONDS = 2.0  # seconds - threshold to determine if color was set "very recently" (DMX active)
+COLOR_SET_RESET_INTERVAL = 2.0  # seconds - interval for resetting color_set_count when tracking DMX update frequency
 STATE_REQUEST_WINDOW = 2.0  # seconds - window for accepting explicitly requested state responses
 
 # Message types
@@ -188,9 +190,9 @@ class LifxLanClient:
         time_since_set = time.time() - light.color_set_time
         time_since_request = time.time() - light.state_requested_time if light.state_requested_time > 0 else float('inf')
         
-        # Use longer protection time if color was set very recently (likely DMX is actively running)
+        # Use longer protection time if color was set very recently (within COLOR_SET_DMX_THRESHOLD_SECONDS, likely DMX is actively running)
         # This prevents stale refresh responses from overwriting actively updated colors
-        protection_time = COLOR_SET_PROTECTION_TIME_DMX if time_since_set < 2.0 else COLOR_SET_PROTECTION_TIME
+        protection_time = COLOR_SET_PROTECTION_TIME_DMX if time_since_set < COLOR_SET_DMX_THRESHOLD_SECONDS else COLOR_SET_PROTECTION_TIME
         
         # Update if: color wasn't set recently (with appropriate protection time), OR we requested state recently
         if time_since_set > protection_time or (light.state_requested_time > 0 and time_since_request < STATE_REQUEST_WINDOW):
@@ -585,14 +587,14 @@ class LifxLanClient:
                 light.color_set_time = current_time
                 
                 # Track color set frequency to detect active DMX updates
-                # Reset count if more than 2 seconds have passed
-                if current_time - light.last_color_set_check > 2.0:
+                # Reset count if more than COLOR_SET_RESET_INTERVAL has passed
+                if current_time - light.last_color_set_check > COLOR_SET_RESET_INTERVAL:
                     light.color_set_count = 0
                     light.last_color_set_check = current_time
                 light.color_set_count += 1
                 
                 # Only request state if colors aren't being set frequently (likely DMX is not actively running)
-                # If colors are being set more than 2 times in 2 seconds, skip state request to avoid stale responses
+                # If colors are being set more than 2 times in COLOR_SET_RESET_INTERVAL, skip state request to avoid stale responses
                 if light.color_set_count <= 2:
                     # Request actual state from light after fade completes to get real values
                     # This ensures we have the actual displayed color, accounting for any device-side adjustments
