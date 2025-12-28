@@ -105,8 +105,32 @@ class LifxLanClient:
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.settimeout(0.5)
-        self.sock.bind((bind_ip, 0))
+        try:
+            self.sock.bind((bind_ip, 0))
+        except OSError:
+            # If binding to specific IP fails (e.g., IP not assigned to interface),
+            # fall back to binding to all interfaces
+            # On Windows, use '' (empty string) for all interfaces; on Unix, '0.0.0.0' works
+            import sys
+            fallback_ip = '' if sys.platform == 'win32' else '0.0.0.0'
+            try:
+                self.sock.bind((fallback_ip, 0))
+                print(f"Warning: Could not bind to {bind_ip}, using all interfaces instead")
+            except OSError as e:
+                # If even fallback fails, try '0.0.0.0' on Windows as last resort
+                if sys.platform == 'win32' and fallback_ip == '':
+                    try:
+                        self.sock.bind(('0.0.0.0', 0))
+                        print(f"Warning: Could not bind to {bind_ip}, using 0.0.0.0 instead")
+                    except OSError:
+                        raise
+                else:
+                    raise
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+        # Track pending state request threads per light to prevent accumulation
+        # Maps target (bytes) -> threading.Event (cancellation flag)
+        self.pending_state_requests: Dict[bytes, threading.Event] = {}
 
         # Start listener thread
         self.listening = True
@@ -515,9 +539,10 @@ class LifxLanClient:
     
     def _get_supported_modes(self, product: int) -> List[str]:
         """Determine supported channel modes based on product ID"""
-        # All LIFX lights support RGB, RGBW, HSI, and HSBK
+        # All LIFX lights support RGB (8bit), RGB (16bit), RGBW (8bit), RGBW (16bit), HSBK (8bit), and HSBK (16bit)
         # RGBW can be used on any light - the white channel will be blended into RGB
-        modes = ["RGB", "RGBW", "HSI", "HSBK"]
+        # 16-bit modes provide higher precision for professional lighting control
+        modes = ["RGB (8bit)", "RGB (16bit)", "RGBW (8bit)", "RGBW (16bit)", "HSBK (8bit)", "HSBK (16bit)"]
         
         return modes
 
@@ -541,6 +566,22 @@ class LifxLanClient:
         r = clamp01(r)
         g = clamp01(g)
         b = clamp01(b)
+        
+        # Check if light is powered on, and turn it on if needed
+        # This ensures color commands are visible even if the light was turned off
+        needs_power_on = False
+        with self.lock:
+            if target in self.lights:
+                light = self.lights[target]
+                # Power value: 0 = off, 65535 = on
+                if light.power == 0:
+                    # Light is off, turn it on first
+                    needs_power_on = True
+                    light.power = 65535  # Update local state immediately
+        
+        # Turn on light if needed (outside lock to avoid blocking)
+        if needs_power_on:
+            self.set_power(target, ip, True)
         
         # Convert RGB to HSBK
         hue, sat, bri, kel = rgb01_to_hsbk(r, g, b, kelvin)
@@ -596,20 +637,76 @@ class LifxLanClient:
                 # Only request state if colors aren't being set frequently (likely DMX is not actively running)
                 # If colors are being set more than 2 times in COLOR_SET_RESET_INTERVAL, skip state request to avoid stale responses
                 if light.color_set_count <= 2:
+                    # Cancel any pending state request for this light to prevent thread accumulation
+                    # Note: We're already inside a lock-protected section (outer lock at line 592)
+                    if target in self.pending_state_requests:
+                        # Signal cancellation to the existing thread
+                        self.pending_state_requests[target].set()
+                    # Create a new cancellation event for this request
+                    cancel_event = threading.Event()
+                    self.pending_state_requests[target] = cancel_event
+                    
                     # Request actual state from light after fade completes to get real values
                     # This ensures we have the actual displayed color, accounting for any device-side adjustments
                     def request_state_after_fade():
                         # Wait for fade to complete plus a small buffer
                         fade_time = max(duration_ms / 1000.0, 0.1) + 0.2
-                        time.sleep(fade_time)
+                        
+                        # Sleep in small increments to allow cancellation
+                        sleep_interval = 0.05  # Check for cancellation every 50ms
+                        elapsed = 0.0
+                        while elapsed < fade_time:
+                            if cancel_event.is_set():
+                                # Request was cancelled, clean up and exit
+                                with self.lock:
+                                    if target in self.pending_state_requests and self.pending_state_requests[target] == cancel_event:
+                                        del self.pending_state_requests[target]
+                                return
+                            sleep_duration = min(sleep_interval, fade_time - elapsed)
+                            time.sleep(sleep_duration)
+                            elapsed += sleep_duration
+                        
+                        # Check for cancellation one more time before requesting
+                        if cancel_event.is_set():
+                            with self.lock:
+                                if target in self.pending_state_requests and self.pending_state_requests[target] == cancel_event:
+                                    del self.pending_state_requests[target]
+                            return
+                        
                         # Only request if we haven't set another color in the meantime and color set count is still low
-                        with self.lock:
-                            if target in self.lights:
-                                time_since_set = time.time() - light.color_set_time
-                                # Only request if color hasn't been updated recently and set count is still low
-                                if time_since_set >= fade_time - 0.1 and light.color_set_count <= 2:
-                                    light.state_requested_time = time.time()
-                                    self._request_light_state(light)
+                        try:
+                            with self.lock:
+                                # Remove from pending requests
+                                if target in self.pending_state_requests and self.pending_state_requests[target] == cancel_event:
+                                    del self.pending_state_requests[target]
+                                
+                                if target in self.lights:
+                                    light = self.lights[target]
+                                    # Safely access attributes with defaults
+                                    color_set_time = getattr(light, 'color_set_time', 0)
+                                    color_set_count = getattr(light, 'color_set_count', 0)
+                                    time_since_set = time.time() - color_set_time
+                                    # Only request if color hasn't been updated recently and set count is still low
+                                    if time_since_set >= fade_time - 0.1 and color_set_count <= 2:
+                                        light.state_requested_time = time.time()
+                                        self._request_light_state(light)
+                        except Exception as e:
+                            # Log error but don't crash - this is a background thread
+                            import sys
+                            try:
+                                target_str = target.hex() if target else "unknown"
+                            except:
+                                target_str = str(target) if target else "unknown"
+                            print(f"Error in request_state_after_fade for target {target_str}: {e}", file=sys.stderr)
+                            import traceback
+                            traceback.print_exc(file=sys.stderr)
+                            # Clean up on error
+                            try:
+                                with self.lock:
+                                    if target and target in self.pending_state_requests and self.pending_state_requests[target] == cancel_event:
+                                        del self.pending_state_requests[target]
+                            except:
+                                pass
                     
                     # Request state in background thread
                     threading.Thread(target=request_state_after_fade, daemon=True).start()
@@ -627,6 +724,13 @@ class LifxLanClient:
     def close(self):
         """Close the client and cleanup"""
         self.listening = False
+        
+        # Cancel all pending state requests
+        with self.lock:
+            for cancel_event in self.pending_state_requests.values():
+                cancel_event.set()
+            self.pending_state_requests.clear()
+        
         if self.sock:
             self.sock.close()
 
