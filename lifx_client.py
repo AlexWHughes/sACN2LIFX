@@ -105,7 +105,27 @@ class LifxLanClient:
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.settimeout(0.5)
-        self.sock.bind((bind_ip, 0))
+        try:
+            self.sock.bind((bind_ip, 0))
+        except OSError:
+            # If binding to specific IP fails (e.g., IP not assigned to interface),
+            # fall back to binding to all interfaces
+            # On Windows, use '' (empty string) for all interfaces; on Unix, '0.0.0.0' works
+            import sys
+            fallback_ip = '' if sys.platform == 'win32' else '0.0.0.0'
+            try:
+                self.sock.bind((fallback_ip, 0))
+                print(f"Warning: Could not bind to {bind_ip}, using all interfaces instead")
+            except OSError as e:
+                # If even fallback fails, try '0.0.0.0' on Windows as last resort
+                if sys.platform == 'win32' and fallback_ip == '':
+                    try:
+                        self.sock.bind(('0.0.0.0', 0))
+                        print(f"Warning: Could not bind to {bind_ip}, using 0.0.0.0 instead")
+                    except OSError:
+                        raise
+                else:
+                    raise
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
         # Track pending state request threads per light to prevent accumulation
@@ -618,13 +638,13 @@ class LifxLanClient:
                 # If colors are being set more than 2 times in COLOR_SET_RESET_INTERVAL, skip state request to avoid stale responses
                 if light.color_set_count <= 2:
                     # Cancel any pending state request for this light to prevent thread accumulation
-                    with self.lock:
-                        if target in self.pending_state_requests:
-                            # Signal cancellation to the existing thread
-                            self.pending_state_requests[target].set()
-                        # Create a new cancellation event for this request
-                        cancel_event = threading.Event()
-                        self.pending_state_requests[target] = cancel_event
+                    # Note: We're already inside a lock-protected section (outer lock at line 592)
+                    if target in self.pending_state_requests:
+                        # Signal cancellation to the existing thread
+                        self.pending_state_requests[target].set()
+                    # Create a new cancellation event for this request
+                    cancel_event = threading.Event()
+                    self.pending_state_requests[target] = cancel_event
                     
                     # Request actual state from light after fade completes to get real values
                     # This ensures we have the actual displayed color, accounting for any device-side adjustments

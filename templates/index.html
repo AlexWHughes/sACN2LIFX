@@ -367,12 +367,8 @@
         let running = false;
         
         function showNotification(message, isError = false) {
-            const notif = document.getElementById('notification');
-            notif.textContent = message;
-            notif.className = 'notification' + (isError ? ' error' : '') + ' show';
-            setTimeout(() => {
-                notif.classList.remove('show');
-            }, 3000);
+            // Notifications disabled
+            return;
         }
         
         async function validateJsonResponse(response) {
